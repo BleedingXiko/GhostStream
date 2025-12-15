@@ -6,9 +6,10 @@ import asyncio
 import uuid
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, Optional, List, Callable, Any
+from typing import Dict, Optional, List, Callable, Any, Set
 from dataclasses import dataclass, field
 from pathlib import Path
+import hashlib
 
 from .models import (
     TranscodeRequest, TranscodeResponse, JobStatus, JobStatusResponse,
@@ -41,6 +42,10 @@ class Job:
     last_accessed: datetime = field(default_factory=datetime.utcnow)
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
     cleaned_up: bool = False
+    # Stream sharing fields
+    stream_key: Optional[str] = None  # Key for shared stream lookup
+    viewer_count: int = 0  # Number of active viewers sharing this stream
+    is_shared: bool = False  # Whether this job is being shared by multiple viewers
     
     def to_response(self) -> TranscodeResponse:
         return TranscodeResponse(
@@ -138,6 +143,11 @@ class JobManager:
         self._job_ttl_streaming = 3600  # 1 hour for streaming jobs
         self._job_ttl_completed = self.config.transcoding.cleanup_after_hours * 3600
         
+        # Stream sharing: maps stream_key -> job_id for active HLS streams
+        self._shared_streams: Dict[str, str] = {}
+        # Track which viewer sessions are using which job
+        self._viewer_sessions: Dict[str, str] = {}  # session_id -> job_id
+        
     async def start(self) -> None:
         """Start the job manager workers and cleanup task."""
         if self._running:
@@ -228,6 +238,12 @@ class JobManager:
         """Process a single job."""
         job.status = JobStatus.PROCESSING
         job.started_at = datetime.utcnow()
+        
+        # For streaming modes, set stream_url early so clients can start polling
+        # The HLS segments will become available incrementally during transcoding
+        if job.request.mode in [TranscodeMode.STREAM, TranscodeMode.ABR]:
+            job.stream_url = f"{self.base_url}/stream/{job.id}/master.m3u8"
+        
         self._notify_status(job.id, JobStatus.PROCESSING)
         
         # Get media info for duration
@@ -342,8 +358,103 @@ class JobManager:
         """Register a status callback."""
         self.status_callbacks.append(callback)
     
-    async def create_job(self, request: TranscodeRequest) -> Job:
-        """Create a new transcoding job."""
+    def _generate_stream_key(self, request: TranscodeRequest) -> str:
+        """Generate a unique key for stream sharing based on source and output config."""
+        # Create a hash of source + relevant output config for stream matching
+        key_parts = [
+            request.source,
+            request.mode.value,
+            request.output.format.value if request.output else "hls",
+            request.output.resolution.value if request.output else "original",
+            str(request.start_time or 0),
+        ]
+        key_string = "|".join(key_parts)
+        return hashlib.sha256(key_string.encode()).hexdigest()[:16]
+    
+    def _is_stream_shareable(self, job: Job) -> bool:
+        """Check if a job's stream can be shared with new viewers."""
+        # Only share active HLS/ABR streaming jobs
+        if job.request.mode not in [TranscodeMode.STREAM, TranscodeMode.ABR]:
+            return False
+        # Must be queued, processing, or ready (not error/cancelled)
+        if job.status not in [JobStatus.QUEUED, JobStatus.PROCESSING, JobStatus.READY]:
+            return False
+        # Must not be cleaned up or cancelled
+        if job.cleaned_up or job.cancel_event.is_set():
+            return False
+        # For READY jobs, only share if transcode actually completed (progress >= 99%)
+        # This prevents sharing incomplete transcodes that erroneously marked as ready
+        if job.status == JobStatus.READY and job.progress < 99.0:
+            logger.warning(f"[StreamShare] Job {job.id} marked READY but progress only {job.progress}% - not shareable")
+            return False
+        return True
+    
+    async def create_job(self, request: TranscodeRequest, session_id: Optional[str] = None) -> Job:
+        """
+        Create a new transcoding job or return existing shared stream.
+        
+        For HLS streaming requests, checks if an identical stream already exists
+        and returns that instead of creating a duplicate transcoding job.
+        
+        Args:
+            request: The transcode request
+            session_id: Optional viewer session ID for tracking
+            
+        Returns:
+            Job instance (either new or existing shared stream)
+        """
+        # Check for stream sharing on HLS/ABR streaming requests
+        if request.mode in [TranscodeMode.STREAM, TranscodeMode.ABR]:
+            stream_key = self._generate_stream_key(request)
+            
+            # Check if we have an existing shared stream for this source
+            if stream_key in self._shared_streams:
+                existing_job_id = self._shared_streams[stream_key]
+                existing_job = self.jobs.get(existing_job_id)
+                
+                if existing_job and self._is_stream_shareable(existing_job):
+                    # Check if this is a NEW viewer or same session requesting again
+                    is_new_viewer = True
+                    if session_id:
+                        # Check if this session already has this job
+                        if self._viewer_sessions.get(session_id) == existing_job_id:
+                            is_new_viewer = False  # Same session, don't increment
+                        else:
+                            # New session joining - track it
+                            self._viewer_sessions[session_id] = existing_job_id
+                    
+                    # Only increment viewer count for genuinely new viewers
+                    if is_new_viewer:
+                        existing_job.viewer_count += 1
+                        existing_job.is_shared = existing_job.viewer_count > 1
+                        logger.info(
+                            f"[StreamShare] Viewer joined existing stream {existing_job_id} "
+                            f"(viewers: {existing_job.viewer_count}, source: {request.source[:50]}...)"
+                        )
+                    
+                    existing_job.last_accessed = datetime.utcnow()
+                    return existing_job
+                else:
+                    # Stream no longer valid, remove from tracking
+                    del self._shared_streams[stream_key]
+            
+            # Create new job with stream sharing enabled
+            job_id = str(uuid.uuid4())
+            job = Job(id=job_id, request=request, stream_key=stream_key, viewer_count=1)
+            
+            self.jobs[job_id] = job
+            self._shared_streams[stream_key] = job_id
+            
+            # Track session if provided
+            if session_id:
+                self._viewer_sessions[session_id] = job_id
+            
+            await self.queue.put(job_id)
+            
+            logger.info(f"[StreamShare] Created new shared stream {job_id} for source: {request.source[:50]}...")
+            return job
+        
+        # Non-streaming jobs: create normally without sharing
         job_id = str(uuid.uuid4())
         job = Job(id=job_id, request=request)
         
@@ -352,6 +463,64 @@ class JobManager:
         
         logger.info(f"Created job {job_id} for source: {request.source}")
         return job
+    
+    async def leave_stream(self, job_id: str, session_id: Optional[str] = None) -> bool:
+        """
+        Decrement viewer count when a viewer leaves a shared stream.
+        
+        Args:
+            job_id: The job ID to leave
+            session_id: Optional session ID to clean up
+            
+        Returns:
+            True if the stream should be kept, False if it can be cleaned up
+        """
+        job = self.jobs.get(job_id)
+        if not job:
+            return False
+        
+        # Clean up session tracking
+        if session_id and session_id in self._viewer_sessions:
+            del self._viewer_sessions[session_id]
+        
+        # Decrement viewer count
+        if job.viewer_count > 0:
+            job.viewer_count -= 1
+            logger.info(f"[StreamShare] Viewer left stream {job_id} (viewers remaining: {job.viewer_count})")
+        
+        # If no more viewers and stream is complete, it can be cleaned up earlier
+        if job.viewer_count == 0 and job.stream_key:
+            job.is_shared = False
+            # Don't remove from _shared_streams yet - let cleanup handle it
+            # This allows new viewers to join even after all leave briefly
+        
+        return job.viewer_count > 0
+    
+    def get_shared_stream_stats(self) -> Dict[str, Any]:
+        """Get statistics about shared streams."""
+        active_shared = 0
+        total_viewers = 0
+        streams_by_source = {}
+        
+        for stream_key, job_id in self._shared_streams.items():
+            job = self.jobs.get(job_id)
+            if job and self._is_stream_shareable(job):
+                active_shared += 1
+                total_viewers += job.viewer_count
+                source_short = job.request.source[:50]
+                streams_by_source[source_short] = {
+                    "job_id": job_id,
+                    "viewers": job.viewer_count,
+                    "status": job.status.value,
+                    "progress": job.progress
+                }
+        
+        return {
+            "active_shared_streams": active_shared,
+            "total_viewers": total_viewers,
+            "viewer_sessions": len(self._viewer_sessions),
+            "streams": streams_by_source
+        }
     
     def get_job(self, job_id: str, touch: bool = True) -> Optional[Job]:
         """Get a job by ID. Updates last_accessed if touch=True."""
@@ -373,8 +542,14 @@ class JobManager:
         job.status = JobStatus.CANCELLED
         job.completed_at = datetime.utcnow()
         
-        # Clean up files
+        # Remove from shared streams tracking so new requests create fresh jobs
+        if job.stream_key and job.stream_key in self._shared_streams:
+            del self._shared_streams[job.stream_key]
+            logger.info(f"[StreamShare] Removed cancelled stream {job_id} from shared streams")
+        
+        # Clean up temp files
         self.engine.cleanup_job(job_id)
+        job.cleaned_up = True
         
         logger.info(f"Cancelled job {job_id}")
         return True
@@ -420,6 +595,16 @@ class JobManager:
         if not job.cleaned_up:
             await self.cleanup_job(job_id)
         
+        # Remove from shared streams tracking
+        if job.stream_key and job.stream_key in self._shared_streams:
+            del self._shared_streams[job.stream_key]
+            logger.debug(f"[StreamShare] Removed stream key {job.stream_key} from shared streams")
+        
+        # Clean up any viewer sessions pointing to this job
+        sessions_to_remove = [sid for sid, jid in self._viewer_sessions.items() if jid == job_id]
+        for sid in sessions_to_remove:
+            del self._viewer_sessions[sid]
+        
         # Remove from jobs dict
         del self.jobs[job_id]
         logger.debug(f"[Cleanup] Removed job {job_id} from tracking")
@@ -450,6 +635,10 @@ class JobManager:
         for job_id, job in list(self.jobs.items()):
             # Skip active/processing jobs
             if job.status in (JobStatus.QUEUED, JobStatus.PROCESSING):
+                continue
+            
+            # Skip shared streams that still have active viewers
+            if job.viewer_count > 0:
                 continue
             
             # Calculate age based on last access or completion

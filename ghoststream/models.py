@@ -84,6 +84,7 @@ class TranscodeRequest(BaseModel):
     output: OutputConfig = Field(default_factory=OutputConfig)
     start_time: float = Field(default=0, description="Start position in seconds")
     callback_url: Optional[str] = Field(default=None, description="URL to call when job completes")
+    session_id: Optional[str] = Field(default=None, description="Viewer session ID for stream sharing")
 
 
 class TranscodeResponse(BaseModel):

@@ -223,15 +223,15 @@ async def get_stats():
 
 @app.post("/api/transcode/start", response_model=TranscodeResponse)
 async def start_transcode(request: TranscodeRequest):
-    """Start a new transcoding job."""
+    """Start a new transcoding job or join existing shared stream."""
     job_manager = get_job_manager()
     
     # Validate source URL
     if not request.source:
         raise HTTPException(status_code=400, detail="Source URL is required")
     
-    # Create job
-    job = await job_manager.create_job(request)
+    # Create job or get existing shared stream (session_id now in request body)
+    job = await job_manager.create_job(request, request.session_id)
     
     return job.to_response()
 
@@ -320,6 +320,34 @@ async def run_cleanup():
     }
 
 
+@app.get("/api/streams/shared")
+async def get_shared_streams():
+    """Get statistics about shared HLS streams."""
+    job_manager = get_job_manager()
+    return job_manager.get_shared_stream_stats()
+
+
+@app.post("/api/transcode/{job_id}/leave")
+async def leave_stream(job_id: str, session_id: Optional[str] = None):
+    """
+    Notify that a viewer is leaving a shared stream.
+    This decrements the viewer count for the stream.
+    """
+    job_manager = get_job_manager()
+    job = job_manager.get_job(job_id, touch=False)
+    
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    has_viewers = await job_manager.leave_stream(job_id, session_id)
+    
+    return {
+        "job_id": job_id,
+        "viewers_remaining": job.viewer_count,
+        "is_shared": job.is_shared
+    }
+
+
 @app.get("/stream/{job_id}/{filename:path}")
 async def stream_file(job_id: str, filename: str, request: Request):
     """Serve HLS stream files."""
@@ -331,6 +359,16 @@ async def stream_file(job_id: str, filename: str, request: Request):
     config = get_config()
     temp_dir = Path(config.transcoding.temp_directory)
     file_path = temp_dir / job_id / filename
+    
+    # For playlist files, wait briefly if still being generated
+    if filename.endswith(".m3u8") and not file_path.exists():
+        job = job_manager.get_job(job_id, touch=False)
+        if job and job.status == JobStatus.PROCESSING:
+            # Wait up to 5 seconds for playlist to be created
+            for _ in range(10):
+                await asyncio.sleep(0.5)
+                if file_path.exists():
+                    break
     
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Stream file not found")
