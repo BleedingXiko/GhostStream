@@ -1,0 +1,52 @@
+server:
+  host: 0.0.0.0
+  port: 8765
+
+mdns:
+  enabled: true
+  service_name: "GhostStream Transcoder"
+
+transcoding:
+  ffmpeg_path: auto  # auto-detect or specify path
+  temp_directory: ./transcode_temp
+  max_concurrent_jobs: 2
+  segment_duration: 4  # seconds for HLS
+  cleanup_after_hours: 24
+  # Advanced options
+  default_video_codec: h264
+  default_audio_codec: aac
+  enable_abr: true  # Adaptive bitrate streaming with multiple quality variants
+  abr_max_variants: 4  # Max quality levels for ABR (1080p, 720p, 480p, etc.)
+  stall_timeout: 120  # Seconds before considering FFmpeg stalled
+  retry_count: 3  # Auto-retry on transient failures
+  tone_map_hdr: true  # Automatically convert HDR to SDR for compatibility
+
+hardware:
+  prefer_hw_accel: true
+  fallback_to_software: true
+  nvenc_preset: p4  # p1-p7 (p1=fastest, p7=best quality)
+  qsv_preset: medium
+  videotoolbox_preset: medium
+  vaapi_device: /dev/dri/renderD128
+
+limits:
+  max_resolution: 4k
+  max_bitrate: 50M
+  max_file_size_gb: 50
+
+ghosthub:
+  # GhostHub AP mode address (when GhostStream connects to GhostHub's WiFi)
+  # If on different network, set GHOSTHUB_URL env var or edit this
+  url: "http://192.168.4.1:5000"
+  auto_register: true
+  register_interval_seconds: 60  # Re-register every minute for reliability
+
+security:
+  api_key: null  # Set to enable API key authentication
+  allowed_origins: []  # Empty = allow all, or list of IPs/hostnames
+  rate_limit_per_minute: 60
+
+logging:
+  level: INFO  # DEBUG, INFO, WARNING, ERROR
+  format: json  # json or text
+  file: null  # Set path to enable file logging

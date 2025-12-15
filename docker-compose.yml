@@ -1,0 +1,72 @@
+version: '3.8'
+
+services:
+  # Standard CPU-only deployment
+  ghoststream:
+    build:
+      context: .
+      target: base
+    container_name: ghoststream
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./ghoststream.yaml:/app/ghoststream.yaml:ro
+      - ./transcode_temp:/app/transcode_temp
+    environment:
+      - TZ=UTC
+    restart: unless-stopped
+    networks:
+      - ghoststream-network
+
+  # NVIDIA GPU deployment
+  ghoststream-nvidia:
+    build:
+      context: .
+      target: nvidia
+    container_name: ghoststream-nvidia
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./ghoststream.yaml:/app/ghoststream.yaml:ro
+      - ./transcode_temp:/app/transcode_temp
+    environment:
+      - TZ=UTC
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, video]
+    restart: unless-stopped
+    networks:
+      - ghoststream-network
+    profiles:
+      - nvidia
+
+  # Intel QSV deployment
+  ghoststream-intel:
+    build:
+      context: .
+      target: intel
+    container_name: ghoststream-intel
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./ghoststream.yaml:/app/ghoststream.yaml:ro
+      - ./transcode_temp:/app/transcode_temp
+    devices:
+      - /dev/dri:/dev/dri
+    environment:
+      - TZ=UTC
+    restart: unless-stopped
+    networks:
+      - ghoststream-network
+    profiles:
+      - intel
+
+networks:
+  ghoststream-network:
+    driver: bridge
