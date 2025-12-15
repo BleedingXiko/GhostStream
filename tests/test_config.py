@@ -53,8 +53,10 @@ class TestLoadConfig:
     
     def test_load_yaml_config(self):
         """Should load config from YAML file."""
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
-            f.write("""
+        fd, path = tempfile.mkstemp(suffix='.yaml')
+        try:
+            with os.fdopen(fd, 'w') as f:
+                f.write("""
 server:
   host: 127.0.0.1
   port: 9000
@@ -63,35 +65,31 @@ mdns:
 transcoding:
   max_concurrent_jobs: 4
 """)
-            f.flush()
-            
-            try:
-                config = load_config(f.name)
-                assert config.server.host == "127.0.0.1"
-                assert config.server.port == 9000
-                assert config.mdns.enabled is False
-                assert config.transcoding.max_concurrent_jobs == 4
-            finally:
-                os.unlink(f.name)
+            config = load_config(path)
+            assert config.server.host == "127.0.0.1"
+            assert config.server.port == 9000
+            assert config.mdns.enabled is False
+            assert config.transcoding.max_concurrent_jobs == 4
+        finally:
+            os.unlink(path)
     
     def test_partial_yaml_config(self):
         """Should merge partial config with defaults."""
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
-            f.write("""
+        fd, path = tempfile.mkstemp(suffix='.yaml')
+        try:
+            with os.fdopen(fd, 'w') as f:
+                f.write("""
 server:
   port: 8000
 """)
-            f.flush()
-            
-            try:
-                config = load_config(f.name)
-                # Custom value
-                assert config.server.port == 8000
-                # Default value
-                assert config.server.host == "0.0.0.0"
-                assert config.mdns.enabled is True
-            finally:
-                os.unlink(f.name)
+            config = load_config(path)
+            # Custom value
+            assert config.server.port == 8000
+            # Default value
+            assert config.server.host == "0.0.0.0"
+            assert config.mdns.enabled is True
+        finally:
+            os.unlink(path)
 
 
 class TestGlobalConfig:
