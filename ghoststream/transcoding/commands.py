@@ -35,6 +35,29 @@ class CommandBuilder:
         self.transcoding_config = transcoding_config
         self.hw_config = hw_config
     
+    def _parse_bitrate(self, bitrate: str) -> tuple:
+        """Parse bitrate string into (value, unit). Returns (float_value, 'M' or 'k')."""
+        bitrate = bitrate.strip()
+        if bitrate.upper().endswith('M'):
+            return float(bitrate[:-1]), 'M'
+        elif bitrate.upper().endswith('K'):
+            return float(bitrate[:-1]), 'k'
+        else:
+            return float(bitrate), 'M'
+    
+    def _get_bufsize(self, bitrate: str) -> str:
+        """Calculate bufsize (2x bitrate) preserving the unit."""
+        value, unit = self._parse_bitrate(bitrate)
+        return f"{int(value * 2)}{unit}"
+    
+    def _get_bandwidth_bps(self, bitrate: str) -> int:
+        """Convert bitrate string to bits per second for HLS playlist."""
+        value, unit = self._parse_bitrate(bitrate)
+        if unit == 'M':
+            return int(value * 1_000_000)
+        else:  # 'k'
+            return int(value * 1_000)
+    
     def _get_bitrate(self, resolution: Resolution, bitrate: str) -> Optional[str]:
         """Get the target bitrate."""
         if bitrate != "auto":
@@ -110,7 +133,7 @@ class CommandBuilder:
         if bitrate and video_encoder != "copy":
             cmd.extend(["-b:v", bitrate])
             # Add maxrate and bufsize for better streaming
-            cmd.extend(["-maxrate", bitrate, "-bufsize", f"{int(bitrate.rstrip('MkK')) * 2}M"])
+            cmd.extend(["-maxrate", bitrate, "-bufsize", self._get_bufsize(bitrate)])
         
         # Keyframe interval for seeking (every 2 seconds)
         if video_encoder != "copy":
@@ -305,7 +328,7 @@ class CommandBuilder:
             map_args.extend([f"-c:v:{i}", video_encoder])
             map_args.extend([f"-b:v:{i}", variant.video_bitrate])
             map_args.extend([f"-maxrate:v:{i}", variant.video_bitrate])
-            map_args.extend([f"-bufsize:v:{i}", f"{int(variant.video_bitrate.rstrip('MkK')) * 2}M"])
+            map_args.extend([f"-bufsize:v:{i}", self._get_bufsize(variant.video_bitrate)])
             
             # Add preset for this variant
             if "nvenc" in video_encoder:
@@ -358,9 +381,7 @@ class CommandBuilder:
         lines = ["#EXTM3U", "#EXT-X-VERSION:3"]
         
         for i, variant in enumerate(variants):
-            bandwidth = int(variant.video_bitrate.rstrip("MkK")) * 1000000
-            if "k" in variant.video_bitrate.lower():
-                bandwidth = int(variant.video_bitrate.rstrip("kK")) * 1000
+            bandwidth = self._get_bandwidth_bps(variant.video_bitrate)
             
             lines.append(
                 f"#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},"
