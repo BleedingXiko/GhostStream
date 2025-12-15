@@ -305,13 +305,18 @@ Use the `stream_url` from the transcode response directly in any HLS-compatible 
 
 ## WebSocket API
 
-Real-time progress updates.
+Real-time progress updates with **production-grade features**:
+- Job subscription filtering (only receive updates for jobs you care about)
+- Automatic heartbeat/keepalive
+- Backpressure handling (server won't overwhelm slow clients)
+- Connection limits (max 1000 concurrent connections)
 
 ```
 WS /ws/progress
 ```
 
-**Connect:**
+### Basic Connection
+
 ```javascript
 const ws = new WebSocket('ws://192.168.4.2:8765/ws/progress');
 
@@ -325,10 +330,48 @@ ws.onmessage = (event) => {
   if (msg.type === 'status_change') {
     console.log(`Job ${msg.job_id} is now ${msg.data.status}`);
   }
+  
+  // Respond to server pings to stay connected
+  if (msg.type === 'ping') {
+    ws.send(JSON.stringify({ type: 'pong' }));
+  }
 };
 ```
 
-**Message Types:**
+### Job Subscriptions (Recommended)
+
+By default, you receive updates for ALL jobs. For better efficiency, subscribe only to jobs you care about:
+
+```javascript
+// Subscribe to specific jobs only
+ws.send(JSON.stringify({
+  type: 'subscribe',
+  job_ids: ['job-123', 'job-456']
+}));
+
+// Unsubscribe when done watching
+ws.send(JSON.stringify({
+  type: 'unsubscribe', 
+  job_ids: ['job-123']
+}));
+
+// Switch back to receiving all updates
+ws.send(JSON.stringify({
+  type: 'subscribe_all'
+}));
+```
+
+### Client → Server Messages
+
+| Type | Payload | Description |
+|------|---------|-------------|
+| `ping` | `{}` | Keepalive ping |
+| `pong` | `{}` | Response to server ping |
+| `subscribe` | `{job_ids: [...]}` | Subscribe to specific jobs |
+| `unsubscribe` | `{job_ids: [...]}` | Unsubscribe from jobs |
+| `subscribe_all` | `{}` | Receive all job updates (default) |
+
+### Server → Client Messages
 
 **Progress Update:**
 ```json
@@ -354,6 +397,50 @@ ws.onmessage = (event) => {
     "status": "ready"
   }
 }
+```
+
+**Ping (keepalive):**
+```json
+{
+  "type": "ping",
+  "ts": 1702656000.123
+}
+```
+
+### Python WebSocket Client Example
+
+```python
+import asyncio
+import websockets
+import json
+
+async def watch_job(server_url: str, job_id: str):
+    """Watch a specific job's progress via WebSocket."""
+    uri = f"ws://{server_url}/ws/progress"
+    
+    async with websockets.connect(uri) as ws:
+        # Subscribe to only this job
+        await ws.send(json.dumps({
+            "type": "subscribe",
+            "job_ids": [job_id]
+        }))
+        
+        async for message in ws:
+            data = json.loads(message)
+            
+            if data["type"] == "ping":
+                await ws.send(json.dumps({"type": "pong"}))
+                
+            elif data["type"] == "progress":
+                print(f"Progress: {data['data']['progress']:.1f}%")
+                
+            elif data["type"] == "status_change":
+                status = data["data"]["status"]
+                print(f"Status: {status}")
+                if status in ("ready", "error", "cancelled"):
+                    break  # Job finished
+
+asyncio.run(watch_job("192.168.4.2:8765", "your-job-id"))
 ```
 
 ---

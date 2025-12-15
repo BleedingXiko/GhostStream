@@ -186,7 +186,7 @@ docker run -d -p 8765:8765 --gpus all --name ghoststream ghoststream
 | GET | `/api/transcode/{id}/status` | Get job status |
 | POST | `/api/transcode/{id}/cancel` | Cancel a job |
 | GET | `/api/transcode/{id}/stream` | Stream transcoded output |
-| WS | `/ws/progress` | Real-time progress updates |
+| WS | `/ws/progress` | Real-time progress updates (with job subscriptions) |
 
 ## Example Usage
 
@@ -327,10 +327,41 @@ GhostStream is designed as the **official transcoding backend for GhostHub**. Wh
 - **Seamless Playback** - Incompatible videos automatically transcoded
 - **Offline Operation** - Works entirely on your local network, no internet needed
 - **Resource Aware** - GhostHub knows GhostStream's capabilities and limits
+- **Real-Time Updates** - WebSocket push for instant progress (no polling)
+
+### Communication Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    GhostHub (Pi)                            │
+│  ┌───────────────┐      ┌───────────────┐                  │
+│  │  HTTP Client  │      │ WebSocket Client│                │
+│  │  (API calls)  │      │ (progress push) │                │
+│  └───────┬───────┘      └───────┬────────┘                 │
+└──────────┼──────────────────────┼──────────────────────────┘
+           │                      │
+           │ REST API             │ WS /ws/progress
+           │ (start, status,      │ (subscribe to jobs,
+           │  cancel)             │  receive updates)
+           ▼                      ▼
+┌─────────────────────────────────────────────────────────────┐
+│                  GhostStream (PC with GPU)                  │
+│  ┌──────────┐  ┌──────────┐  ┌──────────────────┐          │
+│  │ REST API │  │WebSocket │  │ Transcode Engine │          │
+│  │ (FastAPI)│  │ Manager  │  │ (FFmpeg + HW)    │          │
+│  └──────────┘  └──────────┘  └──────────────────┘          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### WebSocket Progress (Recommended)
 
 ```python
-# GhostHub automatically discovers and uses GhostStream
-# No configuration needed - it just works!
+# Subscribe to specific jobs only (efficient)
+ws.send({"type": "subscribe", "job_ids": ["job-123"]})
+
+# Receive real-time progress
+{"type": "progress", "job_id": "job-123", "data": {"progress": 45.2}}
+{"type": "status_change", "job_id": "job-123", "data": {"status": "ready"}}
 ```
 
 ---

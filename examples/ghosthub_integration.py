@@ -20,15 +20,31 @@ Features demonstrated:
     - Hardware acceleration with automatic fallback
     - Job lifecycle management and cleanup
     - Seeking/resume support
+    - Real-time WebSocket progress updates with job subscriptions
+
+Communication Methods:
+    - HTTP REST: API calls (start job, get status, cancel)
+    - WebSocket: Real-time push updates (progress, status changes)
+    - mDNS/UDP: Server discovery on LAN
 """
 
 import asyncio
 import logging
 import httpx
-from typing import Optional, Dict, Any
+import threading
+import json
+from typing import Optional, Dict, Any, Callable, List
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Optional WebSocket support
+try:
+    import websockets
+    HAS_WEBSOCKETS = True
+except ImportError:
+    HAS_WEBSOCKETS = False
+    logger.info("websockets not installed - using HTTP polling for progress")
 
 
 # ============== Direct HTTP Client (Recommended for GhostHub) ==============
@@ -250,6 +266,159 @@ class GhostStreamClient:
         except:
             pass
         return None
+
+
+# ============== WebSocket Client for Real-Time Updates ==============
+
+class GhostStreamWSClient:
+    """
+    WebSocket client for real-time GhostStream progress updates.
+    
+    Benefits over HTTP polling:
+    - Instant updates (no polling delay)
+    - Lower server load
+    - Job subscription filtering (only get updates you need)
+    - Automatic reconnection
+    
+    Usage:
+        ws_client = GhostStreamWSClient("192.168.4.2:8765")
+        ws_client.on_progress = lambda job_id, data: print(f"{job_id}: {data['progress']}%")
+        ws_client.connect()
+        ws_client.subscribe_job("your-job-id")
+    """
+    
+    def __init__(self, server_url: str):
+        self.server_url = server_url
+        self.ws_url = f"ws://{server_url}/ws/progress"
+        self._ws = None
+        self._loop = None
+        self._thread = None
+        self._running = False
+        self._subscribed_jobs: set = set()
+        
+        # Callbacks
+        self.on_progress: Optional[Callable[[str, Dict], None]] = None
+        self.on_status_change: Optional[Callable[[str, str], None]] = None
+        self.on_connect: Optional[Callable[[], None]] = None
+        self.on_disconnect: Optional[Callable[[], None]] = None
+    
+    def connect(self) -> bool:
+        """Connect to GhostStream WebSocket (runs in background thread)."""
+        if not HAS_WEBSOCKETS:
+            logger.warning("websockets package not installed")
+            return False
+        
+        if self._running:
+            return True
+        
+        self._running = True
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread.start()
+        logger.info(f"WebSocket connecting to {self.ws_url}")
+        return True
+    
+    def disconnect(self):
+        """Disconnect from WebSocket."""
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=2.0)
+        self._thread = None
+        logger.info("WebSocket disconnected")
+    
+    def subscribe_job(self, job_id: str):
+        """Subscribe to updates for a specific job."""
+        self._subscribed_jobs.add(job_id)
+        if self._loop and self._ws:
+            asyncio.run_coroutine_threadsafe(
+                self._send({"type": "subscribe", "job_ids": [job_id]}),
+                self._loop
+            )
+    
+    def unsubscribe_job(self, job_id: str):
+        """Unsubscribe from a job's updates."""
+        self._subscribed_jobs.discard(job_id)
+        if self._loop and self._ws:
+            asyncio.run_coroutine_threadsafe(
+                self._send({"type": "unsubscribe", "job_ids": [job_id]}),
+                self._loop
+            )
+    
+    def _run_loop(self):
+        """Background thread event loop."""
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_until_complete(self._connection_loop())
+        self._loop.close()
+    
+    async def _connection_loop(self):
+        """Main connection loop with auto-reconnect."""
+        reconnect_delay = 1.0
+        
+        while self._running:
+            try:
+                async with websockets.connect(self.ws_url, ping_interval=None) as ws:
+                    self._ws = ws
+                    reconnect_delay = 1.0
+                    logger.info("WebSocket connected")
+                    
+                    if self.on_connect:
+                        self.on_connect()
+                    
+                    # Re-subscribe to tracked jobs
+                    if self._subscribed_jobs:
+                        await self._send({"type": "subscribe", "job_ids": list(self._subscribed_jobs)})
+                    
+                    # Message loop
+                    async for message in ws:
+                        if not self._running:
+                            break
+                        await self._handle_message(message)
+                        
+            except Exception as e:
+                logger.warning(f"WebSocket error: {e}")
+                self._ws = None
+                
+                if self.on_disconnect:
+                    self.on_disconnect()
+            
+            # Reconnect with backoff
+            if self._running:
+                await asyncio.sleep(reconnect_delay)
+                reconnect_delay = min(reconnect_delay * 2, 30.0)
+    
+    async def _handle_message(self, message: str):
+        """Handle incoming WebSocket message."""
+        try:
+            data = json.loads(message)
+            msg_type = data.get("type", "")
+            
+            if msg_type == "ping":
+                await self._send({"type": "pong"})
+                
+            elif msg_type == "progress":
+                job_id = data.get("job_id")
+                if self.on_progress:
+                    self.on_progress(job_id, data.get("data", {}))
+                    
+            elif msg_type == "status_change":
+                job_id = data.get("job_id")
+                status = data.get("data", {}).get("status")
+                if self.on_status_change:
+                    self.on_status_change(job_id, status)
+                # Auto-unsubscribe from finished jobs
+                if status in ("ready", "error", "cancelled"):
+                    self._subscribed_jobs.discard(job_id)
+                    
+        except json.JSONDecodeError:
+            pass
+    
+    async def _send(self, data: dict):
+        """Send message to WebSocket."""
+        if self._ws:
+            try:
+                await self._ws.send(json.dumps(data))
+            except:
+                pass
 
 
 # ============== Example Usage ==============
@@ -545,6 +714,89 @@ def example_full_workflow():
     print("✅ Job cleaned up")
 
 
+def example_websocket_progress():
+    """
+    Example 8: Real-Time WebSocket Progress
+    
+    Use WebSocket instead of polling for instant progress updates.
+    """
+    print("\n" + "="*60)
+    print("Example 8: Real-Time WebSocket Progress")
+    print("="*60)
+    
+    if not HAS_WEBSOCKETS:
+        print("❌ websockets package not installed")
+        print("   Install with: pip install websockets")
+        return
+    
+    # HTTP client for API calls
+    http_client = GhostStreamClient("http://192.168.4.2:8765")
+    
+    if not http_client.health_check():
+        print("❌ GhostStream not reachable")
+        return
+    
+    # WebSocket client for real-time updates
+    ws_client = GhostStreamWSClient("192.168.4.2:8765")
+    
+    # Set up callbacks
+    def on_progress(job_id: str, data: Dict):
+        progress = data.get('progress', 0)
+        fps = data.get('fps', 0)
+        speed = data.get('speed', 0)
+        print(f"   📊 {progress:.1f}% | {fps:.0f} fps | {speed:.1f}x speed")
+    
+    def on_status(job_id: str, status: str):
+        print(f"   📌 Status changed: {status}")
+    
+    ws_client.on_progress = on_progress
+    ws_client.on_status_change = on_status
+    
+    # Connect WebSocket
+    ws_client.connect()
+    import time
+    time.sleep(1)  # Wait for connection
+    
+    print("✅ WebSocket connected")
+    
+    # Start a job
+    job = http_client.start_stream(
+        source="http://192.168.4.1:5000/media/video.mkv",
+        resolution="720p"
+    )
+    
+    if not job:
+        print("❌ Failed to start job")
+        ws_client.disconnect()
+        return
+    
+    job_id = job["job_id"]
+    print(f"✅ Job started: {job_id}")
+    
+    # Subscribe to this job's updates only
+    ws_client.subscribe_job(job_id)
+    print("✅ Subscribed to job updates via WebSocket")
+    print("\n   Watching progress (Ctrl+C to stop)...")
+    
+    try:
+        # Wait for completion (progress comes via WebSocket callback)
+        while True:
+            status = http_client.get_job_status(job_id)
+            if status and status.get("status") in ("ready", "error", "cancelled"):
+                print(f"\n✅ Job finished: {status.get('status')}")
+                if status.get("stream_url"):
+                    print(f"   Stream: {status['stream_url']}")
+                break
+            time.sleep(2)
+    except KeyboardInterrupt:
+        print("\n   Interrupted")
+    
+    # Cleanup
+    ws_client.disconnect()
+    http_client.delete_job(job_id)
+    print("✅ Cleaned up")
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("GhostStream Integration Examples")
@@ -558,6 +810,12 @@ Available examples:
   5. Batch Transcoding
   6. Cleanup Management
   7. Full GhostHub Workflow
+  8. Real-Time WebSocket Progress (NEW)
+
+Communication Methods:
+  - HTTP REST: Start jobs, get status, cancel
+  - WebSocket: Real-time progress push (recommended)
+  - mDNS/UDP: Auto-discover servers on LAN
 
 Make sure GhostStream is running on your PC first:
   python -m ghoststream

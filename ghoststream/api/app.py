@@ -18,7 +18,7 @@ from ..discovery import GhostStreamService, GhostHubRegistration
 from ..jobs import JobManager, set_job_manager
 
 from .routes import health_router, transcode_router, stream_router, set_start_time
-from .websocket import websocket_progress_handler, broadcast_progress, broadcast_status
+from .websocket import websocket_progress_handler, broadcast_progress, broadcast_status, get_websocket_manager
 from .middleware import api_key_middleware
 
 logger = logging.getLogger(__name__)
@@ -53,6 +53,10 @@ async def lifespan(app: FastAPI):
     # Initialize job manager
     job_manager = JobManager(base_url=base_url)
     set_job_manager(job_manager)
+    
+    # Start WebSocket manager
+    ws_manager = get_websocket_manager()
+    await ws_manager.start()
     
     # Register WebSocket callbacks
     job_manager.register_progress_callback(broadcast_progress)
@@ -96,6 +100,9 @@ async def lifespan(app: FastAPI):
     
     if ghosthub_registration:
         ghosthub_registration.stop()
+    
+    # Stop WebSocket manager
+    await ws_manager.stop()
     
     await job_manager.stop()
     
