@@ -5,120 +5,18 @@ Job queue and management for GhostStream
 import asyncio
 import uuid
 import logging
-from datetime import datetime, timedelta
-from typing import Dict, Optional, List, Callable, Any, Set
-from dataclasses import dataclass, field
-from pathlib import Path
 import hashlib
+from datetime import datetime
+from typing import Dict, Optional, List, Callable, Any
+from pathlib import Path
 
-from .models import (
-    TranscodeRequest, TranscodeResponse, JobStatus, JobStatusResponse,
-    TranscodeMode
-)
-from .transcoder import TranscodeEngine, TranscodeProgress
-from .config import get_config
+from ..models import JobStatus, TranscodeRequest, TranscodeMode
+from ..transcoding import TranscodeEngine, TranscodeProgress
+from ..config import get_config
+from .models import Job
+from .stats import JobStats
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class Job:
-    """Represents a transcoding job."""
-    id: str
-    request: TranscodeRequest
-    status: JobStatus = JobStatus.QUEUED
-    progress: float = 0.0
-    current_time: float = 0.0
-    duration: float = 0.0
-    stream_url: Optional[str] = None
-    download_url: Optional[str] = None
-    output_path: Optional[str] = None
-    eta_seconds: Optional[int] = None
-    hw_accel_used: Optional[str] = None
-    error_message: Optional[str] = None
-    created_at: datetime = field(default_factory=datetime.utcnow)
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
-    last_accessed: datetime = field(default_factory=datetime.utcnow)
-    cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
-    cleaned_up: bool = False
-    # Stream sharing fields
-    stream_key: Optional[str] = None  # Key for shared stream lookup
-    viewer_count: int = 0  # Number of active viewers sharing this stream
-    is_shared: bool = False  # Whether this job is being shared by multiple viewers
-    
-    def to_response(self) -> TranscodeResponse:
-        return TranscodeResponse(
-            job_id=self.id,
-            status=self.status,
-            progress=self.progress,
-            stream_url=self.stream_url,
-            download_url=self.download_url,
-            eta_seconds=self.eta_seconds,
-            hw_accel_used=self.hw_accel_used,
-            error_message=self.error_message
-        )
-    
-    def to_status_response(self) -> JobStatusResponse:
-        return JobStatusResponse(
-            job_id=self.id,
-            status=self.status,
-            progress=self.progress,
-            current_time=self.current_time,
-            duration=self.duration,
-            stream_url=self.stream_url,
-            download_url=self.download_url,
-            eta_seconds=self.eta_seconds,
-            hw_accel_used=self.hw_accel_used,
-            error_message=self.error_message,
-            created_at=self.created_at,
-            started_at=self.started_at,
-            completed_at=self.completed_at
-        )
-
-
-class JobStats:
-    """Statistics for job processing."""
-    
-    def __init__(self):
-        self.total_jobs_processed: int = 0
-        self.successful_jobs: int = 0
-        self.failed_jobs: int = 0
-        self.cancelled_jobs: int = 0
-        self.total_bytes_processed: int = 0
-        self.total_transcode_time: float = 0.0
-        self.hw_accel_usage: Dict[str, int] = {}
-        self.start_time: datetime = datetime.utcnow()
-    
-    def record_job_complete(self, job: Job, success: bool) -> None:
-        """Record job completion stats."""
-        self.total_jobs_processed += 1
-        
-        if job.status == JobStatus.CANCELLED:
-            self.cancelled_jobs += 1
-        elif success:
-            self.successful_jobs += 1
-        else:
-            self.failed_jobs += 1
-        
-        if job.hw_accel_used:
-            self.hw_accel_usage[job.hw_accel_used] = \
-                self.hw_accel_usage.get(job.hw_accel_used, 0) + 1
-        
-        if job.started_at and job.completed_at:
-            self.total_transcode_time += (job.completed_at - job.started_at).total_seconds()
-    
-    @property
-    def average_transcode_speed(self) -> float:
-        """Average transcoding speed (ratio of content time to transcode time)."""
-        if self.total_transcode_time > 0 and self.successful_jobs > 0:
-            return self.total_transcode_time / self.successful_jobs
-        return 0.0
-    
-    @property
-    def uptime_seconds(self) -> float:
-        """Service uptime in seconds."""
-        return (datetime.utcnow() - self.start_time).total_seconds()
 
 
 class JobManager:
