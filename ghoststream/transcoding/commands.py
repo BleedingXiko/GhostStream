@@ -125,6 +125,9 @@ class CommandBuilder:
         vf_filters = self.filter_builder.build_video_filters(
             media_info, output_config, video_encoder
         )
+        # Ensure compatible pixel format for software encoders
+        if vf_filters and "lib" in video_encoder:
+            vf_filters.append("format=yuv420p")
         if vf_filters:
             cmd.extend(["-vf", ",".join(vf_filters)])
         
@@ -223,6 +226,9 @@ class CommandBuilder:
         vf_filters = self.filter_builder.build_video_filters(
             media_info, output_config, video_encoder
         )
+        # Ensure compatible pixel format for software encoders
+        if vf_filters and "lib" in video_encoder:
+            vf_filters.append("format=yuv420p")
         if vf_filters:
             cmd.extend(["-vf", ",".join(vf_filters)])
         
