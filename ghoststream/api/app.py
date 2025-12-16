@@ -111,6 +111,8 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
+    config = get_config()
+    
     app = FastAPI(
         title="GhostStream",
         description="Open Source Cross-Platform Transcoding Service",
@@ -118,7 +120,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan
     )
     
-    # Add CORS middleware
+    # CORS middleware - allow all for local network use
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -127,10 +129,10 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     
-    # Add API key middleware
+    # API key middleware (optional auth)
     app.middleware("http")(api_key_middleware)
     
-    # Include routers
+    # Routes
     app.include_router(health_router)
     app.include_router(transcode_router)
     app.include_router(stream_router)

@@ -137,43 +137,40 @@ Unlike basic FFmpeg wrappers, GhostStream provides **enterprise-grade features**
 
 ## Quick Start
 
+### Zero Setup (Recommended)
+
+```bash
+git clone https://github.com/BleedingXiko/GhostStream.git
+cd GhostStream
+python run.py
+```
+
+That's it. The launcher handles everything:
+- ✅ Creates virtual environment
+- ✅ Installs dependencies
+- ✅ Detects FFmpeg (shows install instructions if missing)
+- ✅ Starts the server
+
+**Windows users:** Double-click `start.bat`  
+**macOS/Linux users:** Run `./start.sh`
+
+### Docker (Alternative)
+
+```bash
+# CPU
+docker run -d -p 8765:8765 ghcr.io/bleedingxiko/ghoststream
+
+# NVIDIA GPU
+docker run -d -p 8765:8765 --gpus all ghcr.io/bleedingxiko/ghoststream:nvidia
+
+# Intel QSV
+docker run -d -p 8765:8765 --device /dev/dri ghcr.io/bleedingxiko/ghoststream:intel
+```
+
 ### Prerequisites
 
-- Python 3.10+
-- FFmpeg with hardware acceleration support
-
-### Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/ghoststream.git
-cd ghoststream
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # Linux/macOS
-# or
-.\venv\Scripts\activate  # Windows
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Run the service
-python -m ghoststream
-```
-
-### Docker
-
-```bash
-# Build the image
-docker build -t ghoststream .
-
-# Run the container
-docker run -d -p 8765:8765 --name ghoststream ghoststream
-
-# With NVIDIA GPU support
-docker run -d -p 8765:8765 --gpus all --name ghoststream ghoststream
-```
+- **Python 3.10+** - [Download](https://python.org/downloads)
+- **FFmpeg** - Auto-detected, install instructions shown if missing
 
 ## API Endpoints
 
@@ -188,52 +185,60 @@ docker run -d -p 8765:8765 --gpus all --name ghoststream ghoststream
 | GET | `/api/transcode/{id}/stream` | Stream transcoded output |
 | WS | `/ws/progress` | Real-time progress updates (with job subscriptions) |
 
-## Example Usage
+## Examples
 
-### Standard HLS Streaming
+We have examples for every skill level:
+
+| Example | Description |
+|---------|-------------|
+| [examples/quickstart.py](examples/quickstart.py) | Python examples - run interactively |
+| [examples/curl_examples.md](examples/curl_examples.md) | curl/HTTP - no coding required |
+| [examples/web_player.html](examples/web_player.html) | Browser player with hls.js |
+| [examples/ghosthub_integration.py](examples/ghosthub_integration.py) | Full GhostHub integration |
+
+### Quick curl Example
 
 ```bash
+# Start transcode
 curl -X POST http://localhost:8765/api/transcode/start \
   -H "Content-Type: application/json" \
-  -d '{
-    "source": "http://192.168.1.100:5000/video.mkv",
+  -d '{"source": "https://example.com/video.mp4", "mode": "stream"}'
+
+# Response: {"job_id": "abc123", "stream_url": "http://localhost:8765/stream/abc123/master.m3u8"}
+
+# Check status
+curl http://localhost:8765/api/transcode/abc123/status
+
+# Play when ready
+vlc http://localhost:8765/stream/abc123/master.m3u8
+```
+
+### Quick Python Example
+
+```python
+import httpx
+
+# Start transcode
+resp = httpx.post("http://localhost:8765/api/transcode/start", json={
+    "source": "https://example.com/video.mp4",
     "mode": "stream",
-    "output": {
-      "video_codec": "h264",
-      "resolution": "1080p",
-      "hw_accel": "auto"
-    }
-  }'
+    "output": {"resolution": "720p"}
+})
+job = resp.json()
+print(f"Stream URL: {job['stream_url']}")
 ```
 
-### Adaptive Bitrate (ABR) - Multiple Qualities
+### Adaptive Bitrate (ABR)
+
+Netflix-style multiple quality variants:
 
 ```bash
 curl -X POST http://localhost:8765/api/transcode/start \
   -H "Content-Type: application/json" \
-  -d '{
-    "source": "http://192.168.1.100:5000/4k-movie.mkv",
-    "mode": "abr",
-    "output": {
-      "video_codec": "h264",
-      "hw_accel": "auto"
-    }
-  }'
+  -d '{"source": "https://example.com/4k-movie.mp4", "mode": "abr"}'
 ```
 
-ABR automatically generates quality variants (1080p, 720p, 480p, etc.) based on source resolution.
-
-### Response
-
-```json
-{
-  "job_id": "550e8400-e29b-41d4-a716-446655440000",
-  "status": "processing",
-  "progress": 0,
-  "stream_url": "http://192.168.1.50:8765/stream/550e8400-e29b-41d4-a716-446655440000/master.m3u8",
-  "hw_accel_used": "nvenc"
-}
-```
+ABR auto-generates quality variants (1080p, 720p, 480p) based on source resolution.
 
 ## Configuration
 

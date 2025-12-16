@@ -104,12 +104,15 @@ Examples:
     # Print professional startup banner
     _print_startup_banner(config, local_ip)
     
+    # Uvicorn configuration - use uvloop on Linux for better async performance
     uvicorn.run(
         "ghoststream.api:app",
         host=config.server.host,
         port=config.server.port,
         log_level=config.logging.level.lower(),
-        access_log=False
+        access_log=config.logging.level == "DEBUG",
+        loop="uvloop" if sys.platform != "win32" else "asyncio",
+        timeout_keep_alive=30,
     )
 
 

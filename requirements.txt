@@ -28,6 +28,9 @@ python-json-logger>=2.0.7
 # Utilities
 psutil>=5.9.7
 
+# Performance (Linux/macOS - faster async)
+uvloop>=0.19.0; sys_platform != 'win32'
+
 # Testing (optional)
 pytest>=7.4.0
 pytest-asyncio>=0.23.0
