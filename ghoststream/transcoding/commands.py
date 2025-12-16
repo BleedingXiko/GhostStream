@@ -330,11 +330,13 @@ class CommandBuilder:
             map_args.extend([f"-maxrate:v:{i}", variant.video_bitrate])
             map_args.extend([f"-bufsize:v:{i}", self._get_bufsize(variant.video_bitrate)])
             
-            # Add preset for this variant
+            # Add preset for this variant (don't use CRF with ABR - bitrate mode only)
             if "nvenc" in video_encoder:
                 map_args.extend([f"-preset:v:{i}", variant.hw_preset])
-            elif "lib" in video_encoder:
-                map_args.extend([f"-crf:v:{i}", str(variant.crf)])
+            elif "libx264" in video_encoder:
+                map_args.extend([f"-preset:v:{i}", "medium"])
+            elif "libx265" in video_encoder:
+                map_args.extend([f"-preset:v:{i}", "medium"])
             
             # Keyframe interval
             gop = int(media_info.fps * 2) if media_info.fps > 0 else 60
@@ -357,6 +359,10 @@ class CommandBuilder:
         # HLS options
         segment_duration = self.transcoding_config.segment_duration
         
+        # Use forward slashes for FFmpeg paths (works on all platforms)
+        segment_path = str(output_dir / "stream_%v_%05d.ts").replace("\\", "/")
+        playlist_path = str(output_dir / "stream_%v.m3u8").replace("\\", "/")
+        
         cmd.extend([
             "-f", "hls",
             "-hls_time", str(segment_duration),
@@ -365,9 +371,9 @@ class CommandBuilder:
             "-hls_segment_type", "mpegts",
             "-hls_playlist_type", "event",
             "-master_pl_name", "master.m3u8",
-            "-hls_segment_filename", str(output_dir / "stream_%v_%05d.ts"),
+            "-hls_segment_filename", segment_path,
             "-var_stream_map", " ".join(stream_maps),
-            str(output_dir / "stream_%v.m3u8")
+            playlist_path
         ])
         
         return cmd, video_encoder, variants

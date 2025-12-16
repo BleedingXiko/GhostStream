@@ -129,17 +129,27 @@ class FilterBuilder:
         needs_tonemap: bool
     ) -> List[str]:
         """Build filter_complex for ABR multi-output encoding."""
-        filter_parts = []
+        if not variants:
+            return []
         
+        filter_parts = []
+        num_variants = len(variants)
+        
+        # Split input stream for multiple outputs
+        split_outputs = "".join(f"[s{i}]" for i in range(num_variants))
+        
+        if needs_tonemap:
+            tonemap = self.get_tonemap_filter()
+            filter_parts.append(f"[0:v]{tonemap},split={num_variants}{split_outputs}")
+        else:
+            filter_parts.append(f"[0:v]split={num_variants}{split_outputs}")
+        
+        # Scale each split output to variant resolution
         for i, variant in enumerate(variants):
+            # Use scale with pad to ensure even dimensions (required for H.264)
             scale = f"scale={variant.width}:{variant.height}:force_original_aspect_ratio=decrease"
-            
-            if needs_tonemap:
-                tonemap = self.get_tonemap_filter()
-                filter_chain = f"[0:v]{tonemap},{scale},format=yuv420p[v{i}]"
-            else:
-                filter_chain = f"[0:v]{scale},format=yuv420p[v{i}]"
-            
+            pad = f"pad={variant.width}:{variant.height}:(ow-iw)/2:(oh-ih)/2"
+            filter_chain = f"[s{i}]{scale},{pad},format=yuv420p[v{i}]"
             filter_parts.append(filter_chain)
         
         return filter_parts
