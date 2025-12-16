@@ -114,10 +114,13 @@ class FilterBuilder:
             if scale_filter:
                 vf_filters.append(scale_filter)
         
-        # Force 8-bit pixel format for h264 encoders (h264_nvenc doesn't support 10-bit)
+        # Force 8-bit pixel format for h264 encoders
+        # libx264 needs yuv420p; hardware encoders (nvenc/qsv/amf/vaapi) need nv12
+        # Always add at the end to ensure correct format after tonemap+scale chain
         if "h264" in video_encoder and video_encoder != "copy":
-            # Only add format conversion if not already handled by tonemap
-            if not needs_tm:
+            if video_encoder == "libx264":
+                vf_filters.append("format=yuv420p")
+            else:
                 vf_filters.append("format=nv12")
         
         return vf_filters
