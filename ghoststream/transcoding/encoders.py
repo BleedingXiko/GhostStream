@@ -19,6 +19,7 @@ class EncoderSelector:
     def __init__(self, capabilities: Capabilities, hw_config: HardwareConfig):
         self.capabilities = capabilities
         self.hw_config = hw_config
+        self._failed_encoders: set = set()  # Track encoders that have failed
     
     def get_video_encoder(
         self,
@@ -179,3 +180,45 @@ class EncoderSelector:
         ]
         error_lower = error_msg.lower()
         return any(err in error_lower for err in hw_errors)
+    
+    def mark_hw_failed(self, encoder: str) -> None:
+        """
+        Mark a hardware encoder as failed.
+        
+        This prevents the encoder from being selected again until reset.
+        Also updates the capabilities to reflect the failure.
+        """
+        self._failed_encoders.add(encoder)
+        logger.warning(f"[Encoder] Marked encoder as failed: {encoder}")
+        
+        # Update capabilities to mark the corresponding hw accel as unavailable
+        hw_type = self._encoder_to_hw_type(encoder)
+        if hw_type:
+            for hw in self.capabilities.hw_accels:
+                if hw.type == hw_type:
+                    hw.available = False
+                    logger.info(f"[Encoder] Disabled {hw_type.value} hardware acceleration")
+                    break
+    
+    def _encoder_to_hw_type(self, encoder: str) -> HWAccelType | None:
+        """Map encoder name to hardware acceleration type."""
+        if "nvenc" in encoder:
+            return HWAccelType.NVENC
+        elif "qsv" in encoder:
+            return HWAccelType.QSV
+        elif "vaapi" in encoder:
+            return HWAccelType.VAAPI
+        elif "videotoolbox" in encoder:
+            return HWAccelType.VIDEOTOOLBOX
+        elif "amf" in encoder:
+            return HWAccelType.AMF
+        return None
+    
+    def is_encoder_failed(self, encoder: str) -> bool:
+        """Check if an encoder has been marked as failed."""
+        return encoder in self._failed_encoders
+    
+    def reset_failed_encoders(self) -> None:
+        """Reset the list of failed encoders (e.g., after system restart)."""
+        self._failed_encoders.clear()
+        logger.info("[Encoder] Reset failed encoders list")

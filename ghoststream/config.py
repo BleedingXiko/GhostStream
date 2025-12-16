@@ -27,19 +27,34 @@ class GhostHubConfig(BaseModel):
 
 
 class TranscodingConfig(BaseModel):
+    """Transcoding configuration options."""
     ffmpeg_path: str = "auto"
     temp_directory: str = "./transcode_temp"
     max_concurrent_jobs: int = 2
-    segment_duration: int = 4
+    segment_duration: int = 4  # HLS segment duration in seconds
     cleanup_after_hours: int = 24
-    # Advanced options
+    
+    # Codec defaults
     default_video_codec: str = "h264"
     default_audio_codec: str = "aac"
+    
+    # ABR (Adaptive Bitrate) options
     enable_abr: bool = True  # Enable adaptive bitrate streaming
     abr_max_variants: int = 4  # Max quality variants for ABR
-    stall_timeout: int = 120  # Seconds before considering FFmpeg stalled
-    retry_count: int = 3  # Number of retries on failure
+    
+    # Timeout and retry configuration
+    stall_timeout: int = 120  # Base seconds before considering FFmpeg stalled (min 120)
+    stall_timeout_per_segment: int = 10  # Additional timeout per segment duration second
+    retry_count: int = 3  # Number of retries on transient failures
+    retry_delay: int = 2  # Base delay between retries in seconds (increases with attempts)
+    
+    # Processing options
     tone_map_hdr: bool = True  # Auto-convert HDR to SDR
+    validate_segments: bool = True  # Verify segment integrity before reporting success
+    
+    # Scheduling options
+    enable_preemption: bool = False  # Allow high-priority jobs to preempt lower priority
+    max_queue_size: int = 1000  # Maximum jobs in queue
 
 
 class HardwareConfig(BaseModel):

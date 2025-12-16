@@ -479,8 +479,8 @@ class TestTranscodingIntegration:
         assert AdaptiveTranscodeManager is not None
     
     def test_backwards_compatible_imports(self):
-        """Should support imports from old transcoder module."""
-        from ghoststream.transcoder import (
+        """Should support imports from transcoding module."""
+        from ghoststream.transcoding import (
             TranscodeEngine,
             TranscodeProgress,
             MediaInfo,

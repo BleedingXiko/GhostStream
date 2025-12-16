@@ -11,6 +11,8 @@ from .constants import (
     AUDIO_BITRATE_MAP,
     MAX_RETRIES,
     RETRY_DELAY,
+    MIN_STALL_TIMEOUT,
+    STALL_TIMEOUT_PER_SEGMENT,
     get_resolution_map,
     get_bitrate_map,
 )
@@ -35,6 +37,24 @@ from .adaptive import (
     get_adaptive_quality_selector,
     get_adaptive_manager,
 )
+from .worker import (
+    WorkerState,
+    WorkerStats,
+    FFmpegWorker,
+    FFmpegWorkerPool,
+    get_worker_pool,
+    init_worker_pool,
+    shutdown_worker_pool,
+)
+from .scheduler import (
+    JobPriority,
+    JobState,
+    ScheduledJob,
+    JobScheduler,
+    get_scheduler,
+    init_scheduler,
+    shutdown_scheduler,
+)
 
 __all__ = [
     # Models
@@ -48,6 +68,8 @@ __all__ = [
     "AUDIO_BITRATE_MAP",
     "MAX_RETRIES",
     "RETRY_DELAY",
+    "MIN_STALL_TIMEOUT",
+    "STALL_TIMEOUT_PER_SEGMENT",
     "get_resolution_map",
     "get_bitrate_map",
     # Classes
@@ -71,4 +93,20 @@ __all__ = [
     "get_hardware_profiler",
     "get_adaptive_quality_selector",
     "get_adaptive_manager",
+    # Worker Pool
+    "WorkerState",
+    "WorkerStats",
+    "FFmpegWorker",
+    "FFmpegWorkerPool",
+    "get_worker_pool",
+    "init_worker_pool",
+    "shutdown_worker_pool",
+    # Scheduler
+    "JobPriority",
+    "JobState",
+    "ScheduledJob",
+    "JobScheduler",
+    "get_scheduler",
+    "init_scheduler",
+    "shutdown_scheduler",
 ]

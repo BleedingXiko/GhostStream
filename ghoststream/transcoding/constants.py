@@ -106,3 +106,7 @@ AUDIO_BITRATE_MAP = {
 # Retry configuration
 MAX_RETRIES = 3
 RETRY_DELAY = 2  # seconds
+
+# Stall timeout configuration
+MIN_STALL_TIMEOUT = 120  # Minimum stall timeout in seconds
+STALL_TIMEOUT_PER_SEGMENT = 10  # Additional seconds per segment duration
