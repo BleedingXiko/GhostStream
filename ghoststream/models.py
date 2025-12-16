@@ -93,6 +93,7 @@ class TranscodeResponse(BaseModel):
     progress: float = 0
     stream_url: Optional[str] = None
     download_url: Optional[str] = None
+    duration: Optional[float] = None
     eta_seconds: Optional[int] = None
     hw_accel_used: Optional[str] = None
     error_message: Optional[str] = None

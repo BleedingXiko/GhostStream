@@ -201,6 +201,7 @@ Content-Type: application/json
   "status": "processing",
   "progress": 0,
   "stream_url": "http://192.168.4.2:8765/stream/550e8400.../master.m3u8",
+  "duration": 7200.5,
   "hw_accel_used": "nvenc"
 }
 ```
@@ -300,6 +301,8 @@ GET /stream/{job_id}/segment_00001.ts
 ```
 
 Use the `stream_url` from the transcode response directly in any HLS-compatible video player.
+
+**VOD-Style Streaming:** GhostStream serves HLS playlists with proper VOD markers (`#EXT-X-PLAYLIST-TYPE:VOD` and `#EXT-X-ENDLIST`), enabling full seeking from the start—even while transcoding is still in progress. Players like HLS.js will treat the stream as seekable VOD content rather than live.
 
 ---
 

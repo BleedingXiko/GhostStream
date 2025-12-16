@@ -45,6 +45,7 @@ class Job:
             progress=self.progress,
             stream_url=self.stream_url,
             download_url=self.download_url,
+            duration=self.duration,
             eta_seconds=self.eta_seconds,
             hw_accel_used=self.hw_accel_used,
             error_message=self.error_message

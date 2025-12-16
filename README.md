@@ -204,7 +204,7 @@ curl -X POST http://localhost:8765/api/transcode/start \
   -H "Content-Type: application/json" \
   -d '{"source": "https://example.com/video.mp4", "mode": "stream"}'
 
-# Response: {"job_id": "abc123", "stream_url": "http://localhost:8765/stream/abc123/master.m3u8"}
+# Response: {"job_id": "abc123", "stream_url": "http://localhost:8765/stream/abc123/master.m3u8", "duration": 3600.5}
 
 # Check status
 curl http://localhost:8765/api/transcode/abc123/status

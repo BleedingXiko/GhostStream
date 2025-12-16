@@ -5,12 +5,28 @@ Stream serving routes for GhostStream
 import asyncio
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import FileResponse, StreamingResponse
 
 from ...config import get_config
 from ...models import JobStatus
 from ...jobs import get_job_manager
+
+
+def _inject_endlist_if_needed(content: str, job_status: JobStatus) -> str:
+    """Inject #EXT-X-ENDLIST into playlist if transcoding is still in progress.
+    
+    This makes HLS.js treat the stream as VOD (seekable) even during live transcoding.
+    FFmpeg only adds #EXT-X-ENDLIST after transcoding completes, but we need it earlier.
+    """
+    if job_status == JobStatus.PROCESSING and "#EXT-X-ENDLIST" not in content:
+        # Add VOD playlist type header if not present
+        if "#EXT-X-PLAYLIST-TYPE:VOD" not in content:
+            # Insert after #EXTM3U
+            content = content.replace("#EXTM3U\n", "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:VOD\n", 1)
+        # Append ENDLIST tag
+        content = content.rstrip() + "\n#EXT-X-ENDLIST\n"
+    return content
 
 router = APIRouter()
 
@@ -43,6 +59,17 @@ async def stream_file(job_id: str, filename: str, request: Request):
     # Determine content type
     if filename.endswith(".m3u8"):
         media_type = "application/vnd.apple.mpegurl"
+        # For m3u8 playlists, inject #EXT-X-ENDLIST during active transcoding
+        # This makes HLS.js treat the stream as VOD (seekable from the start)
+        job = job_manager.get_job(job_id, touch=False)
+        job_status = job.status if job else JobStatus.READY
+        content = file_path.read_text()
+        content = _inject_endlist_if_needed(content, job_status)
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={"Accept-Ranges": "bytes", "Cache-Control": "no-cache"}
+        )
     elif filename.endswith(".ts"):
         media_type = "video/mp2t"
     elif filename.endswith(".mp4"):

@@ -162,7 +162,7 @@ class CommandBuilder:
             "-hls_segment_filename", str(segment_pattern),
             "-hls_flags", "independent_segments+append_list",
             "-hls_segment_type", "mpegts",
-            "-hls_playlist_type", "event",
+            "-hls_playlist_type", "vod",
             str(playlist_path)
         ])
         
@@ -375,7 +375,7 @@ class CommandBuilder:
             "-hls_list_size", "0",
             "-hls_flags", "independent_segments+append_list",
             "-hls_segment_type", "mpegts",
-            "-hls_playlist_type", "event",
+            "-hls_playlist_type", "vod",
             "-master_pl_name", "master.m3u8",
             "-hls_segment_filename", segment_path,
             "-var_stream_map", " ".join(stream_maps),
