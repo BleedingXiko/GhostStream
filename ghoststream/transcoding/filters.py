@@ -129,7 +129,8 @@ class FilterBuilder:
         self,
         variants: list,
         media_info: MediaInfo,
-        needs_tonemap: bool
+        needs_tonemap: bool,
+        video_encoder: str = "libx264"
     ) -> List[str]:
         """Build filter_complex for ABR multi-output encoding."""
         if not variants:
@@ -147,12 +148,19 @@ class FilterBuilder:
         else:
             filter_parts.append(f"[0:v]split={num_variants}{split_outputs}")
         
+        # Determine pixel format based on encoder
+        # Hardware encoders (nvenc, qsv, amf, vaapi) need nv12; software needs yuv420p
+        if "lib" in video_encoder:
+            pix_fmt = "yuv420p"
+        else:
+            pix_fmt = "nv12"
+        
         # Scale each split output to variant resolution
         for i, variant in enumerate(variants):
             # Use scale with pad to ensure even dimensions (required for H.264)
             scale = f"scale={variant.width}:{variant.height}:force_original_aspect_ratio=decrease"
             pad = f"pad={variant.width}:{variant.height}:(ow-iw)/2:(oh-ih)/2"
-            filter_chain = f"[s{i}]{scale},{pad},format=yuv420p[v{i}]"
+            filter_chain = f"[s{i}]{scale},{pad},format={pix_fmt}[v{i}]"
             filter_parts.append(filter_chain)
         
         return filter_parts

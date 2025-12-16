@@ -320,7 +320,7 @@ class CommandBuilder:
         
         # Build filter complex for multiple outputs
         filter_parts = self.filter_builder.build_abr_filter_complex(
-            variants, media_info, needs_cpu_filters
+            variants, media_info, needs_cpu_filters, video_encoder
         )
         
         map_args = []
