@@ -137,7 +137,19 @@ Unlike basic FFmpeg wrappers, GhostStream provides **enterprise-grade features**
 
 ## Quick Start
 
-### Zero Setup (Recommended)
+### 📦 Download Pre-Built Executable (Easiest)
+
+No Python needed. Just download and run:
+
+| Platform | Download | Run |
+|----------|----------|-----|
+| **Windows** | [GhostStream.exe](https://github.com/BleedingXiko/GhostStream/releases/latest/download/GhostStream.exe) | Double-click |
+| **Linux** | [GhostStream-Linux-x86_64](https://github.com/BleedingXiko/GhostStream/releases/latest/download/GhostStream-Linux-x86_64) | `chmod +x GhostStream-Linux-x86_64 && ./GhostStream-Linux-x86_64` |
+| **macOS** | [GhostStream-macOS](https://github.com/BleedingXiko/GhostStream/releases/latest/download/GhostStream-macOS) | `chmod +x GhostStream-macOS && ./GhostStream-macOS` |
+
+> **Note:** FFmpeg must be installed on your system. The executable will show install instructions if it's missing.
+
+### From Source (Alternative)
 
 ```bash
 git clone https://github.com/BleedingXiko/GhostStream.git

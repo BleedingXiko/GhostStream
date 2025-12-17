@@ -1,0 +1,196 @@
+name: Build Release Executables
+
+on:
+  release:
+    types: [created]
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+          
+      - name: Build executable
+        run: |
+          pyinstaller `
+            --name=GhostStream `
+            --onefile `
+            --console `
+            --noconfirm `
+            --hidden-import=uvicorn.logging `
+            --hidden-import=uvicorn.loops `
+            --hidden-import=uvicorn.loops.auto `
+            --hidden-import=uvicorn.protocols `
+            --hidden-import=uvicorn.protocols.http `
+            --hidden-import=uvicorn.protocols.http.auto `
+            --hidden-import=uvicorn.protocols.websockets `
+            --hidden-import=uvicorn.protocols.websockets.auto `
+            --hidden-import=uvicorn.lifespan `
+            --hidden-import=uvicorn.lifespan.on `
+            --hidden-import=uvicorn.lifespan.off `
+            --hidden-import=fastapi `
+            --hidden-import=starlette `
+            --hidden-import=pydantic `
+            --hidden-import=pydantic_settings `
+            --hidden-import=yaml `
+            --hidden-import=httpx `
+            --hidden-import=aiofiles `
+            --hidden-import=websockets `
+            --hidden-import=zeroconf `
+            --hidden-import=psutil `
+            --hidden-import=multipart `
+            --hidden-import=python_multipart `
+            "--add-data=ghoststream.yaml;." `
+            ghoststream/__main__.py
+          
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GhostStream-Windows
+          path: dist/GhostStream.exe
+          
+      - name: Upload to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/GhostStream.exe
+
+  build-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+          
+      - name: Build single executable
+        run: |
+          pyinstaller \
+            --name=GhostStream \
+            --onefile \
+            --console \
+            --noconfirm \
+            --hidden-import=uvicorn.logging \
+            --hidden-import=uvicorn.loops \
+            --hidden-import=uvicorn.loops.auto \
+            --hidden-import=uvicorn.protocols \
+            --hidden-import=uvicorn.protocols.http \
+            --hidden-import=uvicorn.protocols.http.auto \
+            --hidden-import=uvicorn.protocols.websockets \
+            --hidden-import=uvicorn.protocols.websockets.auto \
+            --hidden-import=uvicorn.lifespan \
+            --hidden-import=uvicorn.lifespan.on \
+            --hidden-import=uvicorn.lifespan.off \
+            --hidden-import=fastapi \
+            --hidden-import=starlette \
+            --hidden-import=pydantic \
+            --hidden-import=pydantic_settings \
+            --hidden-import=yaml \
+            --hidden-import=httpx \
+            --hidden-import=aiofiles \
+            --hidden-import=websockets \
+            --hidden-import=zeroconf \
+            --hidden-import=psutil \
+            --hidden-import=multipart \
+            --hidden-import=python_multipart \
+            --add-data="ghoststream.yaml:." \
+            ghoststream/__main__.py
+          
+          # Rename to include platform
+          mv dist/GhostStream dist/GhostStream-Linux-x86_64
+          
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GhostStream-Linux
+          path: dist/GhostStream-Linux-x86_64
+          
+      - name: Upload to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/GhostStream-Linux-x86_64
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+          
+      - name: Build executable
+        run: |
+          pyinstaller \
+            --name=GhostStream \
+            --onefile \
+            --console \
+            --noconfirm \
+            --hidden-import=uvicorn.logging \
+            --hidden-import=uvicorn.loops \
+            --hidden-import=uvicorn.loops.auto \
+            --hidden-import=uvicorn.protocols \
+            --hidden-import=uvicorn.protocols.http \
+            --hidden-import=uvicorn.protocols.http.auto \
+            --hidden-import=uvicorn.protocols.websockets \
+            --hidden-import=uvicorn.protocols.websockets.auto \
+            --hidden-import=uvicorn.lifespan \
+            --hidden-import=uvicorn.lifespan.on \
+            --hidden-import=uvicorn.lifespan.off \
+            --hidden-import=fastapi \
+            --hidden-import=starlette \
+            --hidden-import=pydantic \
+            --hidden-import=pydantic_settings \
+            --hidden-import=yaml \
+            --hidden-import=httpx \
+            --hidden-import=aiofiles \
+            --hidden-import=websockets \
+            --hidden-import=zeroconf \
+            --hidden-import=psutil \
+            --hidden-import=multipart \
+            --hidden-import=python_multipart \
+            --add-data="ghoststream.yaml:." \
+            ghoststream/__main__.py
+          
+          # Rename to include platform
+          mv dist/GhostStream dist/GhostStream-macOS
+          
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GhostStream-macOS
+          path: dist/GhostStream-macOS
+          
+      - name: Upload to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/GhostStream-macOS
