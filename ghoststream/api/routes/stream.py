@@ -14,18 +14,14 @@ from ...jobs import get_job_manager
 
 
 def _inject_endlist_if_needed(content: str, job_status: JobStatus) -> str:
-    """Inject #EXT-X-ENDLIST into playlist if transcoding is still in progress.
-    
-    This makes HLS.js treat the stream as VOD (seekable) even during live transcoding.
-    FFmpeg only adds #EXT-X-ENDLIST after transcoding completes, but we need it earlier.
     """
-    if job_status == JobStatus.PROCESSING and "#EXT-X-ENDLIST" not in content:
-        # Add VOD playlist type header if not present
-        if "#EXT-X-PLAYLIST-TYPE:VOD" not in content:
-            # Insert after #EXTM3U
-            content = content.replace("#EXTM3U\n", "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:VOD\n", 1)
-        # Append ENDLIST tag
-        content = content.rstrip() + "\n#EXT-X-ENDLIST\n"
+    Ensure playlist has correct tags based on status.
+    For completed jobs, ensure ENDLIST is present.
+    For processing jobs, do NOT add ENDLIST (let it be live/event).
+    """
+    if job_status == JobStatus.READY:
+        if "#EXT-X-ENDLIST" not in content:
+            content = content.rstrip() + "\n#EXT-X-ENDLIST\n"
     return content
 
 router = APIRouter()
@@ -43,15 +39,21 @@ async def stream_file(job_id: str, filename: str, request: Request):
     temp_dir = Path(config.transcoding.temp_directory)
     file_path = temp_dir / job_id / filename
     
-    # For playlist files, wait briefly if still being generated
+    # For playlist files, wait for FFmpeg to create them
+    # HDR/complex files can take 10-20s to produce first segments
     if filename.endswith(".m3u8") and not file_path.exists():
         job = job_manager.get_job(job_id, touch=False)
-        if job and job.status == JobStatus.PROCESSING:
-            # Wait up to 5 seconds for playlist to be created
-            for _ in range(10):
+        if job and job.status in (JobStatus.PROCESSING, JobStatus.QUEUED):
+            # Wait up to 30 seconds for playlist to be created
+            for i in range(60):
                 await asyncio.sleep(0.5)
                 if file_path.exists():
                     break
+                # Re-check job status in case it failed
+                if i % 10 == 9:  # Every 5 seconds
+                    job = job_manager.get_job(job_id, touch=False)
+                    if not job or job.status == JobStatus.ERROR:
+                        break
     
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Stream file not found")

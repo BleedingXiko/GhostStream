@@ -424,6 +424,33 @@ class AdaptiveQualitySelector:
     def __init__(self, profile: SystemProfile):
         self.profile = profile
     
+    def get_max_abr_variants(self) -> int:
+        """
+        Get maximum number of ABR variants based on hardware tier.
+        
+        Consumer NVIDIA GPUs have NVENC session limits:
+        - GeForce cards: typically 2-3 concurrent encode sessions
+        - Quadro/RTX professional: 8+ sessions
+        - Laptops: often more restricted due to thermals
+        
+        We use conservative limits to ensure reliability.
+        """
+        tier_variants = {
+            HardwareTier.ULTRA: 4,    # High-end desktop, likely Quadro/RTX
+            HardwareTier.HIGH: 3,     # Good desktop GPU
+            HardwareTier.MEDIUM: 2,   # Entry GPU or laptop - NVENC limit!
+            HardwareTier.LOW: 1,      # Weak GPU, single stream only
+            HardwareTier.MINIMAL: 1,  # Very limited
+        }
+        
+        max_variants = tier_variants.get(self.profile.tier, 2)
+        
+        # Extra caution for laptops due to thermals and NVENC restrictions
+        if self.profile.is_laptop and max_variants > 2:
+            max_variants = 2
+            
+        return max_variants
+    
     def get_optimal_presets(self, media_info: MediaInfo) -> List[QualityPreset]:
         """Get optimal quality presets for the source media given hardware limits."""
         max_width, max_height = self.profile.max_resolution
@@ -459,8 +486,39 @@ class AdaptiveQualitySelector:
                 crf=23,
                 hw_preset="p4"
             ))
+            return valid_presets
+            
+        # Limit variants based on hardware capability (NVENC session limits, etc.)
+        max_variants = self.get_max_abr_variants()
         
-        return valid_presets
+        if len(valid_presets) <= max_variants:
+            return valid_presets
+            
+        # Select variants with good spread up to max_variants
+        selected = []
+        
+        # Always include highest quality
+        selected.append(valid_presets[0])
+        
+        # Always include lowest quality (if we have room)
+        if max_variants >= 2:
+            selected.append(valid_presets[-1])
+        
+        # Add middle variants if we have room
+        if max_variants >= 3:
+            mid_high_idx = len(valid_presets) // 3
+            if valid_presets[mid_high_idx] not in selected:
+                selected.append(valid_presets[mid_high_idx])
+            
+        if max_variants >= 4:
+            mid_low_idx = (len(valid_presets) * 2) // 3
+            if valid_presets[mid_low_idx] not in selected:
+                selected.append(valid_presets[mid_low_idx])
+            
+        # Restore sort order (High -> Low)
+        selected.sort(key=lambda x: x.width, reverse=True)
+        
+        return selected
     
     def get_single_best_preset(self, media_info: MediaInfo) -> QualityPreset:
         """Get the single best quality preset for transcoding."""

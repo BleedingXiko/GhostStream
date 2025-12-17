@@ -38,12 +38,14 @@ class MediaProbe:
         cmd = [self.ffprobe_path]
         
         # Add protocol options for HTTP sources
+        # Use smaller analyze/probe sizes for faster probing over slow networks (e.g. Pi)
         if source.startswith('http://') or source.startswith('https://'):
             cmd.extend([
                 "-headers", "User-Agent: GhostStream/1.0\r\n",
-                "-timeout", "30000000",  # 30 second timeout in microseconds
-                "-analyzeduration", "100M",  # Analyze more for accurate info
-                "-probesize", "100M",
+                "-timeout", "60000000",  # 60 second timeout in microseconds
+                "-analyzeduration", "10M",  # 10MB - enough for most files, much faster
+                "-probesize", "10M",  # 10MB - reduces initial read significantly
+                "-fflags", "+genpts",  # Generate PTS if missing
             ])
         
         cmd.extend([

@@ -65,14 +65,17 @@ class CommandBuilder:
         return get_bitrate_map().get(resolution)
     
     def _get_protocol_args(self, source: str) -> List[str]:
-        """Get protocol options for HTTP sources."""
+        """Get protocol options for HTTP sources (optimized for Pi/slow networks)."""
         if source.startswith('http://') or source.startswith('https://'):
             return [
                 "-headers", "User-Agent: GhostStream/1.0\r\n",
                 "-reconnect", "1",
                 "-reconnect_streamed", "1",
-                "-reconnect_delay_max", "5",
-                "-timeout", "30000000",
+                "-reconnect_delay_max", "10",
+                "-timeout", "60000000",  # 60 second timeout
+                "-analyzeduration", "10M",  # Faster analysis
+                "-probesize", "10M",
+                "-fflags", "+genpts+discardcorrupt",
             ]
         return []
     
@@ -141,7 +144,12 @@ class CommandBuilder:
         # Keyframe interval for seeking (every 2 seconds)
         if video_encoder != "copy":
             gop_size = int((media_info.fps if media_info else 30) * 2)
-            cmd.extend(["-g", str(gop_size), "-keyint_min", str(gop_size)])
+            cmd.extend([
+                "-g", str(gop_size),
+                "-keyint_min", str(gop_size),
+                "-sc_threshold", "0",
+                "-flags", "+cgop",
+            ])
         
         # Audio encoding with proper channel handling
         cmd.extend(["-c:a", audio_encoder])
@@ -162,7 +170,7 @@ class CommandBuilder:
             "-hls_segment_filename", str(segment_pattern),
             "-hls_flags", "independent_segments+append_list",
             "-hls_segment_type", "mpegts",
-            "-hls_playlist_type", "vod",
+            "-hls_playlist_type", "event",
             str(playlist_path)
         ])
         
@@ -267,18 +275,56 @@ class CommandBuilder:
         return cmd, video_encoder
     
     def get_abr_variants(self, media_info: MediaInfo) -> List[QualityPreset]:
-        """Get appropriate ABR variants based on source resolution."""
+        """
+        Get appropriate ABR variants based on source resolution.
+        Ensures a good spread of qualities including low-bandwidth options.
+        """
         variants = []
         source_height = media_info.height
         
+        # Filter presets that fit within source resolution
+        possible_variants = []
         for preset in QUALITY_LADDER:
             if preset.height <= source_height:
-                variants.append(preset)
+                possible_variants.append(preset)
         
-        if not variants and QUALITY_LADDER:
-            variants.append(QUALITY_LADDER[-1])
+        if not possible_variants:
+            if QUALITY_LADDER:
+                # Source is smaller than smallest preset, just use the smallest
+                possible_variants.append(QUALITY_LADDER[-1])
+            return possible_variants
+            
+        # Select up to 4 variants with good spread
+        # Always include the highest possible (native-ish)
+        # Always include the lowest possible (fallback)
+        # Fill in between
         
-        return variants[:4]
+        if len(possible_variants) <= 4:
+            return possible_variants
+            
+        # We have more than 4, pick 4 strategically
+        selected = []
+        
+        # 1. Highest quality
+        selected.append(possible_variants[0])
+        
+        # 2. Lowest quality (last one)
+        selected.append(possible_variants[-1])
+        
+        # 3. Middle high
+        mid_high_idx = len(possible_variants) // 3
+        if possible_variants[mid_high_idx] not in selected:
+            selected.append(possible_variants[mid_high_idx])
+            
+        # 4. Middle low
+        mid_low_idx = (len(possible_variants) * 2) // 3
+        if len(selected) < 4 and possible_variants[mid_low_idx] not in selected:
+            selected.append(possible_variants[mid_low_idx])
+            
+        # Sort by resolution/bitrate descending (restore order)
+        selected.sort(key=lambda x: (x.height, self._parse_bitrate(x.video_bitrate)[0]), reverse=True)
+        
+        return selected
     
     def build_abr_command(
         self,
@@ -286,7 +332,8 @@ class CommandBuilder:
         output_dir: Path,
         output_config: OutputConfig,
         media_info: MediaInfo,
-        start_time: float = 0
+        start_time: float = 0,
+        variants: Optional[List[QualityPreset]] = None
     ) -> Tuple[List[str], str, List[QualityPreset]]:
         """Build FFmpeg command for ABR HLS with multiple quality variants."""
         
@@ -296,7 +343,8 @@ class CommandBuilder:
         )
         audio_encoder, _ = self.encoder_selector.get_audio_encoder(output_config.audio_codec)
         
-        variants = self.get_abr_variants(media_info)
+        if variants is None:
+            variants = self.get_abr_variants(media_info)
         
         cmd = [self.ffmpeg_path, "-y", "-hide_banner"]
         
@@ -346,7 +394,12 @@ class CommandBuilder:
             
             # Keyframe interval
             gop = int(media_info.fps * 2) if media_info.fps > 0 else 60
-            map_args.extend([f"-g:v:{i}", str(gop)])
+            map_args.extend([
+                f"-g:v:{i}", str(gop),
+                f"-keyint_min:v:{i}", str(gop),
+                f"-sc_threshold:v:{i}", "0",
+                f"-flags:v:{i}", "+cgop",
+            ])
             
             stream_maps.append(f"v:{i},a:0")
         
@@ -375,7 +428,7 @@ class CommandBuilder:
             "-hls_list_size", "0",
             "-hls_flags", "independent_segments+append_list",
             "-hls_segment_type", "mpegts",
-            "-hls_playlist_type", "vod",
+            "-hls_playlist_type", "event",
             "-master_pl_name", "master.m3u8",
             "-hls_segment_filename", segment_path,
             "-var_stream_map", " ".join(stream_maps),

@@ -401,11 +401,12 @@ class TranscodeEngine:
         output_dir: Path,
         output_config: OutputConfig,
         media_info: MediaInfo,
-        start_time: float = 0
+        start_time: float = 0,
+        variants: Optional[List[QualityPreset]] = None
     ) -> Tuple[List[str], str, List[QualityPreset]]:
         """Build FFmpeg command for ABR HLS."""
         return self.command_builder.build_abr_command(
-            source, output_dir, output_config, media_info, start_time
+            source, output_dir, output_config, media_info, start_time, variants
         )
     
     def get_abr_variants(self, media_info: MediaInfo) -> List[QualityPreset]:
@@ -1408,8 +1409,11 @@ class TranscodeEngine:
                 
                 current_config = OutputConfig(**output_config.model_dump())
                 
+                # Get hardware-optimized variants
+                variants = self.get_optimal_presets(media_info)
+                
                 cmd, encoder_used, variants = self.build_abr_command(
-                    source, job_dir, current_config, media_info, start_time
+                    source, job_dir, current_config, media_info, start_time, variants
                 )
                 
                 # Validate bitrate spacing
@@ -1450,6 +1454,10 @@ class TranscodeEngine:
                                 pass
                         
                         return True, str(master_path), hw_accel
+                
+                # Log the specific error before falling back
+                error_msg = error_output[-1000:] if error_output else "Unknown error"
+                logger.warning(f"{log_prefix} ABR failed (code {return_code}): {error_msg[:200]}...")
                 
                 logger.warning(f"{log_prefix} ABR failed, falling back to single quality")
                 # Remove from registry before recursive call (it will re-register)

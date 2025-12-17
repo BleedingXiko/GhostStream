@@ -36,6 +36,9 @@ class JobManager:
         self._cleanup_task: Optional[asyncio.Task] = None
         self._running = False
         
+        # Concurrency control
+        self._create_lock = asyncio.Lock()  # Protects stream creation race conditions
+        
         # Cleanup settings
         self._cleanup_interval = 300  # 5 minutes
         self._job_ttl_streaming = 3600  # 1 hour for streaming jobs
@@ -301,66 +304,76 @@ class JobManager:
         Returns:
             Job instance (either new or existing shared stream)
         """
-        # Check for stream sharing on HLS/ABR streaming requests
-        if request.mode in [TranscodeMode.STREAM, TranscodeMode.ABR]:
-            stream_key = self._generate_stream_key(request)
-            
-            # Check if we have an existing shared stream for this source
-            if stream_key in self._shared_streams:
-                existing_job_id = self._shared_streams[stream_key]
-                existing_job = self.jobs.get(existing_job_id)
+        async with self._create_lock:
+            # Check for stream sharing on HLS/ABR streaming requests
+            if request.mode in [TranscodeMode.STREAM, TranscodeMode.ABR]:
+                stream_key = self._generate_stream_key(request)
                 
-                if existing_job and self._is_stream_shareable(existing_job):
-                    # Check if this is a NEW viewer or same session requesting again
-                    is_new_viewer = True
-                    if session_id:
-                        # Check if this session already has this job
-                        if self._viewer_sessions.get(session_id) == existing_job_id:
-                            is_new_viewer = False  # Same session, don't increment
-                        else:
-                            # New session joining - track it
-                            self._viewer_sessions[session_id] = existing_job_id
+                # Check if we have an existing shared stream for this source
+                if stream_key in self._shared_streams:
+                    existing_job_id = self._shared_streams[stream_key]
+                    existing_job = self.jobs.get(existing_job_id)
                     
-                    # Only increment viewer count for genuinely new viewers
-                    if is_new_viewer:
-                        existing_job.viewer_count += 1
-                        existing_job.is_shared = existing_job.viewer_count > 1
-                        logger.info(
-                            f"[StreamShare] Viewer joined existing stream {existing_job_id} "
-                            f"(viewers: {existing_job.viewer_count}, source: {request.source[:50]}...)"
-                        )
-                    
-                    existing_job.last_accessed = datetime.utcnow()
-                    return existing_job
-                else:
-                    # Stream no longer valid, remove from tracking
-                    del self._shared_streams[stream_key]
+                    if existing_job and self._is_stream_shareable(existing_job):
+                        # Check if this is a NEW viewer or same session requesting again
+                        is_new_viewer = True
+                        if session_id:
+                            # Check if this session already has this job
+                            if self._viewer_sessions.get(session_id) == existing_job_id:
+                                is_new_viewer = False  # Same session, don't increment
+                            else:
+                                # New session joining - track it
+                                self._viewer_sessions[session_id] = existing_job_id
+                        
+                        # Only increment viewer count for genuinely new viewers
+                        if is_new_viewer:
+                            existing_job.viewer_count += 1
+                            existing_job.is_shared = existing_job.viewer_count > 1
+                            logger.info(
+                                f"[StreamShare] Viewer joined existing stream {existing_job_id} "
+                                f"(viewers: {existing_job.viewer_count}, source: {request.source[:50]}...)"
+                            )
+                        
+                        existing_job.last_accessed = datetime.utcnow()
+                        return existing_job
+                    else:
+                        # Stream no longer valid, remove from tracking
+                        if stream_key in self._shared_streams:
+                            del self._shared_streams[stream_key]
+                
+                # Create new job with stream sharing enabled
+                job_id = str(uuid.uuid4())
+                job = Job(id=job_id, request=request, stream_key=stream_key, viewer_count=1)
+                
+                # Set stream_url IMMEDIATELY so clients can start trying to load
+                # The proxy will wait for the manifest to be ready
+                job.stream_url = f"{self.base_url}/stream/{job_id}/master.m3u8"
+                
+                self.jobs[job_id] = job
+                self._shared_streams[stream_key] = job_id
+                
+                # Track session if provided
+                if session_id:
+                    self._viewer_sessions[session_id] = job_id
+                
+                await self.queue.put(job_id)
+                
+                logger.info(f"[StreamShare] Created new shared stream {job_id} for source: {request.source[:50]}...")
+                return job
             
-            # Create new job with stream sharing enabled
+            # Non-streaming jobs: create normally without sharing
             job_id = str(uuid.uuid4())
-            job = Job(id=job_id, request=request, stream_key=stream_key, viewer_count=1)
+            job = Job(id=job_id, request=request)
+            
+            # For STREAM mode without sharing, still set stream_url immediately
+            if request.mode == TranscodeMode.STREAM:
+                job.stream_url = f"{self.base_url}/stream/{job_id}/master.m3u8"
             
             self.jobs[job_id] = job
-            self._shared_streams[stream_key] = job_id
-            
-            # Track session if provided
-            if session_id:
-                self._viewer_sessions[session_id] = job_id
-            
             await self.queue.put(job_id)
             
-            logger.info(f"[StreamShare] Created new shared stream {job_id} for source: {request.source[:50]}...")
+            logger.info(f"Created job {job_id} for source: {request.source}")
             return job
-        
-        # Non-streaming jobs: create normally without sharing
-        job_id = str(uuid.uuid4())
-        job = Job(id=job_id, request=request)
-        
-        self.jobs[job_id] = job
-        await self.queue.put(job_id)
-        
-        logger.info(f"Created job {job_id} for source: {request.source}")
-        return job
     
     async def leave_stream(self, job_id: str, session_id: Optional[str] = None) -> bool:
         """
@@ -531,7 +544,23 @@ class JobManager:
         jobs_to_remove = []
         
         for job_id, job in list(self.jobs.items()):
-            # Skip active/processing jobs
+            # Check for stalled active streams (no access for > 5 mins)
+            if job.status == JobStatus.PROCESSING and job.request.mode in (TranscodeMode.STREAM, TranscodeMode.ABR):
+                # Calculate time since last access
+                time_since_access = (now - job.last_accessed).total_seconds()
+                
+                # Also check time since start to avoid killing just-started jobs
+                time_since_start = 0
+                if job.started_at:
+                    time_since_start = (now - job.started_at).total_seconds()
+                
+                # Allow at least 2 minutes grace period from start
+                if time_since_start > 120 and time_since_access > 300:
+                    logger.info(f"[Cleanup] Job {job_id} stalled (no access for {time_since_access:.0f}s), cancelling")
+                    await self.cancel_job(job_id)
+                    continue
+
+            # Skip active/processing jobs for normal cleanup
             if job.status in (JobStatus.QUEUED, JobStatus.PROCESSING):
                 continue
             

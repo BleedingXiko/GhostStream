@@ -142,12 +142,6 @@ class FilterBuilder:
         # Split input stream for multiple outputs
         split_outputs = "".join(f"[s{i}]" for i in range(num_variants))
         
-        if needs_tonemap:
-            tonemap = self.get_tonemap_filter()
-            filter_parts.append(f"[0:v]{tonemap},split={num_variants}{split_outputs}")
-        else:
-            filter_parts.append(f"[0:v]split={num_variants}{split_outputs}")
-        
         # Determine pixel format based on encoder
         # Hardware encoders (nvenc, qsv, amf, vaapi) need nv12; software needs yuv420p
         if "lib" in video_encoder:
@@ -155,12 +149,28 @@ class FilterBuilder:
         else:
             pix_fmt = "nv12"
         
+        if needs_tonemap:
+            # For HDR content, tonemap outputs yuv420p
+            # If we need nv12 for hardware encoder, add conversion after tonemap
+            tonemap = self.get_tonemap_filter()
+            if pix_fmt == "nv12":
+                # Tonemap ends with yuv420p, convert to nv12 for NVENC
+                filter_parts.append(f"[0:v]{tonemap},format={pix_fmt},split={num_variants}{split_outputs}")
+            else:
+                filter_parts.append(f"[0:v]{tonemap},split={num_variants}{split_outputs}")
+        else:
+            filter_parts.append(f"[0:v]split={num_variants}{split_outputs}")
+        
         # Scale each split output to variant resolution
         for i, variant in enumerate(variants):
             # Use scale with pad to ensure even dimensions (required for H.264)
             scale = f"scale={variant.width}:{variant.height}:force_original_aspect_ratio=decrease"
             pad = f"pad={variant.width}:{variant.height}:(ow-iw)/2:(oh-ih)/2"
-            filter_chain = f"[s{i}]{scale},{pad},format={pix_fmt}[v{i}]"
+            # Don't add format again if we already handled it above for HDR
+            if needs_tonemap:
+                filter_chain = f"[s{i}]{scale},{pad}[v{i}]"
+            else:
+                filter_chain = f"[s{i}]{scale},{pad},format={pix_fmt}[v{i}]"
             filter_parts.append(filter_chain)
         
         return filter_parts
