@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GhostStream Demo - One Click</title>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: #fff;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 800px;
+            width: 100%;
+            text-align: center;
+        }
+        
+        h1 {
+            font-size: 2.5rem;
+            margin-bottom: 8px;
+            background: linear-gradient(90deg, #00d4ff, #7b2cbf);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        .subtitle {
+            color: #888;
+            margin-bottom: 30px;
+            font-size: 1.1rem;
+        }
+        
+        /* Initial State - Big Play Button */
+        .play-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
+        }
+        
+        .big-play {
+            width: 120px;
+            height: 120px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #00d4ff, #0077b6);
+            border: none;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 48px;
+            color: white;
+            box-shadow: 0 10px 40px rgba(0, 212, 255, 0.4);
+            transition: all 0.3s ease;
+        }
+        
+        .big-play:hover {
+            transform: scale(1.1);
+            box-shadow: 0 15px 50px rgba(0, 212, 255, 0.6);
+        }
+        
+        .big-play:disabled {
+            background: #444;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+        
+        .hint {
+            color: #666;
+            font-size: 0.9rem;
+        }
+        
+        /* Progress State */
+        .progress-container {
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            gap: 15px;
+            width: 100%;
+        }
+        
+        .progress-ring {
+            width: 150px;
+            height: 150px;
+            position: relative;
+        }
+        
+        .progress-ring svg {
+            transform: rotate(-90deg);
+        }
+        
+        .progress-ring circle {
+            fill: none;
+            stroke-width: 8;
+        }
+        
+        .progress-ring .bg {
+            stroke: #333;
+        }
+        
+        .progress-ring .fg {
+            stroke: #00d4ff;
+            stroke-linecap: round;
+            stroke-dasharray: 408;
+            stroke-dashoffset: 408;
+            transition: stroke-dashoffset 0.3s ease;
+        }
+        
+        .progress-text {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 1.8rem;
+            font-weight: bold;
+        }
+        
+        .status-text {
+            font-size: 1.1rem;
+            color: #aaa;
+        }
+        
+        .hw-badge {
+            background: #333;
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            color: #00d4ff;
+        }
+        
+        /* Player State */
+        .player-container {
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            gap: 15px;
+            width: 100%;
+        }
+        
+        video {
+            width: 100%;
+            max-width: 720px;
+            border-radius: 12px;
+            background: #000;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+        }
+        
+        .stream-url {
+            background: #0f3460;
+            padding: 12px 20px;
+            border-radius: 8px;
+            font-family: monospace;
+            font-size: 0.85rem;
+            word-break: break-all;
+            max-width: 100%;
+        }
+        
+        .btn-stop {
+            background: #e94560;
+            border: none;
+            padding: 12px 30px;
+            border-radius: 8px;
+            color: white;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        
+        .btn-stop:hover {
+            background: #c73e54;
+        }
+        
+        /* Error State */
+        .error-container {
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            gap: 15px;
+        }
+        
+        .error-icon {
+            font-size: 4rem;
+        }
+        
+        .error-message {
+            color: #e94560;
+            font-size: 1.1rem;
+        }
+        
+        .btn-retry {
+            background: #00d4ff;
+            border: none;
+            padding: 12px 30px;
+            border-radius: 8px;
+            color: #000;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        
+        /* Server config (collapsed by default) */
+        .config {
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 1px solid #333;
+        }
+        
+        .config summary {
+            cursor: pointer;
+            color: #666;
+            font-size: 0.9rem;
+        }
+        
+        .config-content {
+            margin-top: 15px;
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+        
+        .config input {
+            background: #0f3460;
+            border: 1px solid #333;
+            padding: 10px 15px;
+            border-radius: 8px;
+            color: #fff;
+            font-size: 0.9rem;
+            width: 250px;
+        }
+        
+        .config button {
+            background: #333;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 8px;
+            color: #fff;
+            cursor: pointer;
+        }
+        
+        .config button:hover {
+            background: #444;
+        }
+        
+        .connection-status {
+            margin-top: 10px;
+            font-size: 0.85rem;
+        }
+        
+        .connection-status.connected { color: #4ade80; }
+        .connection-status.error { color: #e94560; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>👻 GhostStream Demo</h1>
+        <p class="subtitle">One-click video transcoding</p>
+        
+        <!-- Initial State -->
+        <div class="play-container" id="playContainer">
+            <button class="big-play" id="playBtn" onclick="startDemo()">▶</button>
+            <p class="hint">Click to transcode a 10-second demo clip (Big Buck Bunny)</p>
+        </div>
+        
+        <!-- Progress State -->
+        <div class="progress-container" id="progressContainer">
+            <div class="progress-ring">
+                <svg width="150" height="150">
+                    <circle class="bg" cx="75" cy="75" r="65"></circle>
+                    <circle class="fg" id="progressCircle" cx="75" cy="75" r="65"></circle>
+                </svg>
+                <div class="progress-text" id="progressText">0%</div>
+            </div>
+            <p class="status-text" id="statusText">Starting...</p>
+            <span class="hw-badge" id="hwBadge">Detecting hardware...</span>
+        </div>
+        
+        <!-- Player State -->
+        <div class="player-container" id="playerContainer">
+            <video id="video" controls autoplay></video>
+            <div class="stream-url" id="streamUrl"></div>
+            <button class="btn-stop" onclick="stopDemo()">■ Stop & Clean Up</button>
+        </div>
+        
+        <!-- Error State -->
+        <div class="error-container" id="errorContainer">
+            <div class="error-icon">❌</div>
+            <p class="error-message" id="errorMessage">Something went wrong</p>
+            <button class="btn-retry" onclick="retry()">Try Again</button>
+        </div>
+        
+        <!-- Config (collapsed) -->
+        <details class="config">
+            <summary>⚙️ Server Settings</summary>
+            <div class="config-content">
+                <input type="text" id="serverUrl" value="http://localhost:8765" placeholder="GhostStream URL">
+                <button onclick="checkConnection()">Test Connection</button>
+            </div>
+            <p class="connection-status" id="connectionStatus"></p>
+        </details>
+    </div>
+
+    <script>
+        // Test video - short clip from Big Buck Bunny
+        const TEST_VIDEO = "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_1MB.mp4";
+        
+        let currentJobId = null;
+        let hls = null;
+        let pollInterval = null;
+        
+        function getServer() {
+            return document.getElementById('serverUrl').value.replace(/\/$/, '');
+        }
+        
+        function showState(state) {
+            document.getElementById('playContainer').style.display = state === 'play' ? 'flex' : 'none';
+            document.getElementById('progressContainer').style.display = state === 'progress' ? 'flex' : 'none';
+            document.getElementById('playerContainer').style.display = state === 'player' ? 'flex' : 'none';
+            document.getElementById('errorContainer').style.display = state === 'error' ? 'flex' : 'none';
+        }
+        
+        function setProgress(percent) {
+            const circle = document.getElementById('progressCircle');
+            const circumference = 408; // 2 * PI * 65
+            const offset = circumference - (percent / 100) * circumference;
+            circle.style.strokeDashoffset = offset;
+            document.getElementById('progressText').textContent = `${Math.round(percent)}%`;
+        }
+        
+        async function checkConnection() {
+            const statusEl = document.getElementById('connectionStatus');
+            statusEl.className = 'connection-status';
+            statusEl.textContent = 'Checking...';
+            
+            try {
+                const resp = await fetch(`${getServer()}/api/health`);
+                const data = await resp.json();
+                statusEl.className = 'connection-status connected';
+                statusEl.textContent = `✅ Connected - v${data.version}`;
+                return true;
+            } catch (e) {
+                statusEl.className = 'connection-status error';
+                statusEl.textContent = `❌ Cannot connect - is GhostStream running?`;
+                return false;
+            }
+        }
+        
+        async function startDemo() {
+            // Check connection first
+            const connected = await checkConnection();
+            if (!connected) {
+                showState('error');
+                document.getElementById('errorMessage').textContent = 
+                    'Cannot connect to GhostStream. Make sure it\'s running: python run.py';
+                return;
+            }
+            
+            showState('progress');
+            setProgress(0);
+            document.getElementById('statusText').textContent = 'Starting transcode...';
+            document.getElementById('hwBadge').textContent = 'Detecting hardware...';
+            
+            try {
+                // Start transcode
+                const resp = await fetch(`${getServer()}/api/transcode/start`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        source: TEST_VIDEO,
+                        mode: 'stream',
+                        output: {
+                            resolution: '720p',
+                            video_codec: 'h264'
+                        }
+                    })
+                });
+                
+                if (!resp.ok) {
+                    throw new Error(`Server error: ${resp.status}`);
+                }
+                
+                const job = await resp.json();
+                currentJobId = job.job_id;
+                
+                // Start polling
+                pollInterval = setInterval(pollStatus, 500);
+                
+            } catch (e) {
+                showState('error');
+                document.getElementById('errorMessage').textContent = e.message;
+            }
+        }
+        
+        async function pollStatus() {
+            if (!currentJobId) return;
+            
+            try {
+                const resp = await fetch(`${getServer()}/api/transcode/${currentJobId}/status`);
+                const data = await resp.json();
+                
+                const progress = data.progress || 0;
+                setProgress(progress);
+                
+                document.getElementById('statusText').textContent = 
+                    data.status.charAt(0).toUpperCase() + data.status.slice(1);
+                
+                if (data.hw_accel_used) {
+                    const hw = data.hw_accel_used.toUpperCase();
+                    document.getElementById('hwBadge').textContent = 
+                        hw === 'SOFTWARE' ? '🖥️ CPU Encoding' : `⚡ ${hw} Accelerated`;
+                }
+                
+                // Ready to play
+                if (data.status === 'ready' || (data.status === 'processing' && data.stream_url && progress > 5)) {
+                    clearInterval(pollInterval);
+                    playStream(data.stream_url);
+                }
+                
+                // Error states
+                if (data.status === 'error') {
+                    clearInterval(pollInterval);
+                    showState('error');
+                    document.getElementById('errorMessage').textContent = 
+                        data.error_message || 'Transcode failed';
+                }
+                
+                if (data.status === 'cancelled') {
+                    clearInterval(pollInterval);
+                    showState('play');
+                }
+                
+            } catch (e) {
+                console.error('Poll error:', e);
+            }
+        }
+        
+        function playStream(streamUrl) {
+            showState('player');
+            document.getElementById('streamUrl').textContent = streamUrl;
+            
+            const video = document.getElementById('video');
+            
+            if (Hls.isSupported()) {
+                hls = new Hls({
+                    enableWorker: true,
+                    lowLatencyMode: true
+                });
+                hls.loadSource(streamUrl);
+                hls.attachMedia(video);
+                hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                    video.play().catch(() => {});
+                });
+                hls.on(Hls.Events.ERROR, (event, data) => {
+                    if (data.fatal) {
+                        console.error('HLS fatal error:', data);
+                    }
+                });
+            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                // Safari native HLS
+                video.src = streamUrl;
+                video.play().catch(() => {});
+            } else {
+                document.getElementById('streamUrl').textContent = 
+                    '❌ HLS not supported in this browser. Try Chrome, Firefox, or Safari.';
+            }
+        }
+        
+        async function stopDemo() {
+            // Stop HLS
+            if (hls) {
+                hls.destroy();
+                hls = null;
+            }
+            document.getElementById('video').src = '';
+            
+            // Cancel/delete job
+            if (currentJobId) {
+                try {
+                    await fetch(`${getServer()}/api/transcode/${currentJobId}`, { method: 'DELETE' });
+                } catch (e) {}
+                currentJobId = null;
+            }
+            
+            showState('play');
+        }
+        
+        function retry() {
+            currentJobId = null;
+            showState('play');
+        }
+        
+        // Check connection on load
+        window.onload = checkConnection;
+        
+        // Cleanup on page unload
+        window.onbeforeunload = () => {
+            if (currentJobId) {
+                // Use sendBeacon for reliable cleanup
+                navigator.sendBeacon(
+                    `${getServer()}/api/transcode/${currentJobId}`,
+                    new Blob([''], { type: 'application/json' })
+                );
+            }
+        };
+    </script>
+</body>
+</html>
