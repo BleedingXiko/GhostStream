@@ -29,31 +29,63 @@ jobs:
             --onefile `
             --console `
             --noconfirm `
+            --collect-all=ghoststream `
+            --collect-all=uvicorn `
+            --collect-all=starlette `
+            --collect-all=fastapi `
+            --collect-all=pydantic `
+            --collect-all=pydantic_core `
+            --collect-all=pydantic_settings `
             --hidden-import=uvicorn.logging `
             --hidden-import=uvicorn.loops `
             --hidden-import=uvicorn.loops.auto `
             --hidden-import=uvicorn.protocols `
             --hidden-import=uvicorn.protocols.http `
             --hidden-import=uvicorn.protocols.http.auto `
+            --hidden-import=uvicorn.protocols.http.h11_impl `
             --hidden-import=uvicorn.protocols.websockets `
             --hidden-import=uvicorn.protocols.websockets.auto `
+            --hidden-import=uvicorn.protocols.websockets.wsproto_impl `
+            --hidden-import=uvicorn.protocols.websockets.websockets_impl `
             --hidden-import=uvicorn.lifespan `
             --hidden-import=uvicorn.lifespan.on `
             --hidden-import=uvicorn.lifespan.off `
-            --hidden-import=fastapi `
-            --hidden-import=starlette `
-            --hidden-import=pydantic `
-            --hidden-import=pydantic_settings `
+            --hidden-import=starlette.responses `
+            --hidden-import=starlette.routing `
+            --hidden-import=starlette.middleware `
+            --hidden-import=starlette.middleware.cors `
+            --hidden-import=starlette.staticfiles `
+            --hidden-import=starlette.templating `
+            --hidden-import=anyio `
+            --hidden-import=anyio._backends `
+            --hidden-import=anyio._backends._asyncio `
+            --hidden-import=sniffio `
+            --hidden-import=h11 `
+            --hidden-import=httptools `
+            --hidden-import=dotenv `
             --hidden-import=yaml `
             --hidden-import=httpx `
+            --hidden-import=httpcore `
             --hidden-import=aiofiles `
+            --hidden-import=aiofiles.os `
+            --hidden-import=aiofiles.ospath `
             --hidden-import=websockets `
+            --hidden-import=websockets.legacy `
+            --hidden-import=websockets.legacy.server `
             --hidden-import=zeroconf `
+            --hidden-import=zeroconf._utils `
             --hidden-import=psutil `
             --hidden-import=multipart `
             --hidden-import=python_multipart `
+            --hidden-import=email.mime.multipart `
+            --hidden-import=concurrent.futures `
+            --hidden-import=asyncio `
+            --hidden-import=json `
+            --hidden-import=logging.handlers `
+            --hidden-import=typing_extensions `
+            --hidden-import=annotated_types `
             "--add-data=ghoststream.yaml;." `
-            ghoststream/__main__.py
+            ghoststream/launcher.py
           
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -90,31 +122,57 @@ jobs:
             --onefile \
             --console \
             --noconfirm \
+            --collect-all=ghoststream \
+            --collect-all=uvicorn \
+            --collect-all=starlette \
+            --collect-all=fastapi \
+            --collect-all=pydantic \
+            --collect-all=pydantic_core \
+            --collect-all=pydantic_settings \
             --hidden-import=uvicorn.logging \
             --hidden-import=uvicorn.loops \
             --hidden-import=uvicorn.loops.auto \
+            --hidden-import=uvicorn.loops.uvloop \
             --hidden-import=uvicorn.protocols \
             --hidden-import=uvicorn.protocols.http \
             --hidden-import=uvicorn.protocols.http.auto \
+            --hidden-import=uvicorn.protocols.http.h11_impl \
+            --hidden-import=uvicorn.protocols.http.httptools_impl \
             --hidden-import=uvicorn.protocols.websockets \
             --hidden-import=uvicorn.protocols.websockets.auto \
+            --hidden-import=uvicorn.protocols.websockets.wsproto_impl \
+            --hidden-import=uvicorn.protocols.websockets.websockets_impl \
             --hidden-import=uvicorn.lifespan \
             --hidden-import=uvicorn.lifespan.on \
             --hidden-import=uvicorn.lifespan.off \
-            --hidden-import=fastapi \
-            --hidden-import=starlette \
-            --hidden-import=pydantic \
-            --hidden-import=pydantic_settings \
+            --hidden-import=starlette.responses \
+            --hidden-import=starlette.routing \
+            --hidden-import=starlette.middleware \
+            --hidden-import=starlette.middleware.cors \
+            --hidden-import=starlette.staticfiles \
+            --hidden-import=anyio \
+            --hidden-import=anyio._backends \
+            --hidden-import=anyio._backends._asyncio \
+            --hidden-import=sniffio \
+            --hidden-import=h11 \
+            --hidden-import=httptools \
+            --hidden-import=uvloop \
             --hidden-import=yaml \
             --hidden-import=httpx \
+            --hidden-import=httpcore \
             --hidden-import=aiofiles \
+            --hidden-import=aiofiles.os \
             --hidden-import=websockets \
+            --hidden-import=websockets.legacy \
+            --hidden-import=websockets.legacy.server \
             --hidden-import=zeroconf \
             --hidden-import=psutil \
             --hidden-import=multipart \
             --hidden-import=python_multipart \
+            --hidden-import=typing_extensions \
+            --hidden-import=annotated_types \
             --add-data="ghoststream.yaml:." \
-            ghoststream/__main__.py
+            ghoststream/launcher.py
           
           # Rename to include platform
           mv dist/GhostStream dist/GhostStream-Linux-x86_64
@@ -154,31 +212,57 @@ jobs:
             --onefile \
             --console \
             --noconfirm \
+            --collect-all=ghoststream \
+            --collect-all=uvicorn \
+            --collect-all=starlette \
+            --collect-all=fastapi \
+            --collect-all=pydantic \
+            --collect-all=pydantic_core \
+            --collect-all=pydantic_settings \
             --hidden-import=uvicorn.logging \
             --hidden-import=uvicorn.loops \
             --hidden-import=uvicorn.loops.auto \
+            --hidden-import=uvicorn.loops.uvloop \
             --hidden-import=uvicorn.protocols \
             --hidden-import=uvicorn.protocols.http \
             --hidden-import=uvicorn.protocols.http.auto \
+            --hidden-import=uvicorn.protocols.http.h11_impl \
+            --hidden-import=uvicorn.protocols.http.httptools_impl \
             --hidden-import=uvicorn.protocols.websockets \
             --hidden-import=uvicorn.protocols.websockets.auto \
+            --hidden-import=uvicorn.protocols.websockets.wsproto_impl \
+            --hidden-import=uvicorn.protocols.websockets.websockets_impl \
             --hidden-import=uvicorn.lifespan \
             --hidden-import=uvicorn.lifespan.on \
             --hidden-import=uvicorn.lifespan.off \
-            --hidden-import=fastapi \
-            --hidden-import=starlette \
-            --hidden-import=pydantic \
-            --hidden-import=pydantic_settings \
+            --hidden-import=starlette.responses \
+            --hidden-import=starlette.routing \
+            --hidden-import=starlette.middleware \
+            --hidden-import=starlette.middleware.cors \
+            --hidden-import=starlette.staticfiles \
+            --hidden-import=anyio \
+            --hidden-import=anyio._backends \
+            --hidden-import=anyio._backends._asyncio \
+            --hidden-import=sniffio \
+            --hidden-import=h11 \
+            --hidden-import=httptools \
+            --hidden-import=uvloop \
             --hidden-import=yaml \
             --hidden-import=httpx \
+            --hidden-import=httpcore \
             --hidden-import=aiofiles \
+            --hidden-import=aiofiles.os \
             --hidden-import=websockets \
+            --hidden-import=websockets.legacy \
+            --hidden-import=websockets.legacy.server \
             --hidden-import=zeroconf \
             --hidden-import=psutil \
             --hidden-import=multipart \
             --hidden-import=python_multipart \
+            --hidden-import=typing_extensions \
+            --hidden-import=annotated_types \
             --add-data="ghoststream.yaml:." \
-            ghoststream/__main__.py
+            ghoststream/launcher.py
           
           # Rename to include platform
           mv dist/GhostStream dist/GhostStream-macOS
