@@ -106,7 +106,13 @@ AUDIO_BITRATE_MAP = {
 # Retry configuration
 MAX_RETRIES = 3
 RETRY_DELAY = 2  # seconds
+MAX_RETRY_DELAY = 60  # Max delay for exponential backoff (seconds)
+TRANSIENT_INFINITE_RETRY = True  # Keep retrying transient network errors indefinitely
 
 # Stall timeout configuration
 MIN_STALL_TIMEOUT = 120  # Minimum stall timeout in seconds
 STALL_TIMEOUT_PER_SEGMENT = 10  # Additional seconds per segment duration
+
+# Stderr buffer configuration
+STDERR_BUFFER_SIZE = 200  # Lines to keep in stderr buffer
+STDERR_EARLY_BUFFER_SIZE = 50  # Lines to preserve from early stderr (errors)

@@ -379,6 +379,8 @@ class JobManager:
         """
         Decrement viewer count when a viewer leaves a shared stream.
         
+        Uses _create_lock to prevent race conditions with viewer_count.
+        
         Args:
             job_id: The job ID to leave
             session_id: Optional session ID to clean up
@@ -386,26 +388,27 @@ class JobManager:
         Returns:
             True if the stream should be kept, False if it can be cleaned up
         """
-        job = self.jobs.get(job_id)
-        if not job:
-            return False
-        
-        # Clean up session tracking
-        if session_id and session_id in self._viewer_sessions:
-            del self._viewer_sessions[session_id]
-        
-        # Decrement viewer count
-        if job.viewer_count > 0:
-            job.viewer_count -= 1
-            logger.info(f"[StreamShare] Viewer left stream {job_id} (viewers remaining: {job.viewer_count})")
-        
-        # If no more viewers and stream is complete, it can be cleaned up earlier
-        if job.viewer_count == 0 and job.stream_key:
-            job.is_shared = False
-            # Don't remove from _shared_streams yet - let cleanup handle it
-            # This allows new viewers to join even after all leave briefly
-        
-        return job.viewer_count > 0
+        async with self._create_lock:  # Protect viewer_count modification
+            job = self.jobs.get(job_id)
+            if not job:
+                return False
+            
+            # Clean up session tracking
+            if session_id and session_id in self._viewer_sessions:
+                del self._viewer_sessions[session_id]
+            
+            # Decrement viewer count
+            if job.viewer_count > 0:
+                job.viewer_count -= 1
+                logger.info(f"[StreamShare] Viewer left stream {job_id} (viewers remaining: {job.viewer_count})")
+            
+            # If no more viewers and stream is complete, it can be cleaned up earlier
+            if job.viewer_count == 0 and job.stream_key:
+                job.is_shared = False
+                # Don't remove from _shared_streams yet - let cleanup handle it
+                # This allows new viewers to join even after all leave briefly
+            
+            return job.viewer_count > 0
     
     def get_shared_stream_stats(self) -> Dict[str, Any]:
         """Get statistics about shared streams."""
@@ -483,6 +486,99 @@ class JobManager:
         if job:
             job.last_accessed = datetime.utcnow()
     
+    async def restart_stale_stream(self, job_id: str) -> Optional[Job]:
+        """
+        Restart a stale streaming job that stopped generating segments.
+        
+        This handles the case where a user leaves and comes back, but FFmpeg
+        has stopped or crashed. Creates a new job with the same parameters
+        and cleans up the old one.
+        
+        Returns:
+            New Job if restart succeeded, None if not applicable
+        """
+        job = self.jobs.get(job_id)
+        if not job:
+            return None
+        
+        # Only restart streaming jobs
+        if job.request.mode not in [TranscodeMode.STREAM, TranscodeMode.ABR]:
+            return None
+        
+        logger.info(f"[StreamRestart] Restarting stale stream {job_id}")
+        
+        # Cancel the old job and clean it up
+        old_stream_key = job.stream_key
+        job.cancel_event.set()
+        
+        # Wait briefly for cancellation to propagate
+        await asyncio.sleep(0.5)
+        
+        # Clean up old job files
+        self.engine.cleanup_job(job_id)
+        job.cleaned_up = True
+        job.status = JobStatus.CANCELLED
+        
+        # Remove from shared streams so new job can take over
+        if old_stream_key and old_stream_key in self._shared_streams:
+            del self._shared_streams[old_stream_key]
+        
+        # Remove old job from tracking
+        if job_id in self.jobs:
+            del self.jobs[job_id]
+        
+        # Create a fresh job with the same request
+        # This will get a new job_id but same stream_key
+        new_job = await self.create_job(job.request)
+        
+        logger.info(f"[StreamRestart] Created new job {new_job.id} to replace stale {job_id}")
+        return new_job
+    
+    def is_stream_stale(self, job_id: str, stale_threshold: float = 30.0) -> bool:
+        """
+        Check if a streaming job's output is stale (not being updated).
+        
+        Args:
+            job_id: The job to check
+            stale_threshold: Seconds without playlist update to consider stale
+            
+        Returns:
+            True if stream appears stale and needs restart
+        """
+        job = self.jobs.get(job_id)
+        if not job:
+            return False
+        
+        # Only check streaming jobs that are supposedly processing
+        if job.request.mode not in [TranscodeMode.STREAM, TranscodeMode.ABR]:
+            return False
+        
+        if job.status != JobStatus.PROCESSING:
+            return False
+        
+        # Check playlist file modification time
+        from pathlib import Path
+        import time
+        
+        config = get_config()
+        playlist_path = Path(config.transcoding.temp_directory) / job_id / "master.m3u8"
+        
+        if not playlist_path.exists():
+            # No playlist yet - might still be starting up
+            # Check if job has been processing for too long without output
+            if job.started_at:
+                time_since_start = (datetime.utcnow() - job.started_at).total_seconds()
+                if time_since_start > 60:  # 1 minute without playlist = stale
+                    return True
+            return False
+        
+        try:
+            mtime = playlist_path.stat().st_mtime
+            staleness = time.time() - mtime
+            return staleness > stale_threshold
+        except Exception:
+            return False
+    
     async def cleanup_job(self, job_id: str) -> bool:
         """Explicitly clean up a job's temp files and remove from tracking."""
         job = self.jobs.get(job_id)
@@ -522,13 +618,29 @@ class JobManager:
         return True
     
     async def _cleanup_loop(self) -> None:
-        """Background task that periodically cleans up stale jobs."""
+        """Background task that periodically cleans up stale jobs and orphaned directories."""
         logger.info("[Cleanup] Starting cleanup loop")
+        
+        orphan_cleanup_counter = 0
+        worker_health_counter = 0
         
         while self._running:
             try:
                 await asyncio.sleep(self._cleanup_interval)
                 await self._cleanup_stale_jobs()
+                
+                # Run orphan cleanup every 3 cycles (15 minutes with 5min interval)
+                orphan_cleanup_counter += 1
+                if orphan_cleanup_counter >= 3:
+                    await self._cleanup_orphaned_dirs()
+                    orphan_cleanup_counter = 0
+                
+                # Check worker health every cycle
+                worker_health_counter += 1
+                if worker_health_counter >= 1:
+                    await self._check_worker_health()
+                    worker_health_counter = 0
+                    
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -625,6 +737,48 @@ class JobManager:
             logger.info(f"[Cleanup] Cleaned up {cleaned} orphaned temp dir(s)")
         
         return cleaned
+    
+    async def _check_worker_health(self) -> None:
+        """
+        Check if all workers are still running and restart any that crashed.
+        
+        This prevents silent throughput loss when a worker dies unexpectedly.
+        """
+        max_workers = self.config.transcoding.max_concurrent_jobs
+        
+        # Count alive workers
+        alive_workers = []
+        dead_workers = []
+        
+        for i, worker in enumerate(self._workers):
+            if worker.done():
+                # Worker finished - check if it was an error
+                try:
+                    exc = worker.exception()
+                    if exc:
+                        logger.error(f"[WorkerHealth] Worker {i} crashed with: {exc}")
+                        dead_workers.append(i)
+                    else:
+                        # Worker finished cleanly (shouldn't happen while running)
+                        dead_workers.append(i)
+                except asyncio.CancelledError:
+                    dead_workers.append(i)
+            else:
+                alive_workers.append(i)
+        
+        # Restart dead workers
+        if dead_workers and self._running:
+            logger.warning(f"[WorkerHealth] {len(dead_workers)} worker(s) died, restarting...")
+            
+            # Remove dead workers from list
+            self._workers = [w for i, w in enumerate(self._workers) if i not in dead_workers]
+            
+            # Start new workers to replace dead ones
+            for i in range(len(dead_workers)):
+                new_worker_id = len(self._workers)
+                new_worker = asyncio.create_task(self._worker(new_worker_id))
+                self._workers.append(new_worker)
+                logger.info(f"[WorkerHealth] Started replacement worker {new_worker_id}")
     
     async def _cleanup_all_jobs(self) -> None:
         """Clean up all jobs (called on shutdown)."""

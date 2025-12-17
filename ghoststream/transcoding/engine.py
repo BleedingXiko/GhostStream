@@ -20,7 +20,16 @@ from ..models import OutputConfig, OutputFormat, VideoCodec, HWAccel, TranscodeM
 from ..hardware import get_capabilities
 from ..config import get_config
 from .models import MediaInfo, TranscodeProgress, QualityPreset
-from .constants import MAX_RETRIES, RETRY_DELAY, MIN_STALL_TIMEOUT, STALL_TIMEOUT_PER_SEGMENT
+from .constants import (
+    MAX_RETRIES, 
+    RETRY_DELAY, 
+    MIN_STALL_TIMEOUT, 
+    STALL_TIMEOUT_PER_SEGMENT,
+    MAX_RETRY_DELAY,
+    TRANSIENT_INFINITE_RETRY,
+    STDERR_BUFFER_SIZE,
+    STDERR_EARLY_BUFFER_SIZE,
+)
 from .filters import FilterBuilder
 from .encoders import EncoderSelector
 from .probe import MediaProbe
@@ -615,6 +624,7 @@ class TranscodeEngine:
         progress_parser = ProgressParser(throttle_interval=0.5)
         state = {
             "stderr_lines": [],
+            "stderr_early": [],  # Preserve early errors separately
             "stdout_bytes": 0,
             "last_progress_time": time.time(),
             "last_file_size": 0,
@@ -720,10 +730,16 @@ class TranscodeEngine:
                     break
                 
                 line_str = line.decode("utf-8", errors="ignore")
+                
+                # Preserve early errors in separate buffer (first N lines)
+                if len(state["stderr_early"]) < STDERR_EARLY_BUFFER_SIZE:
+                    state["stderr_early"].append(line_str)
+                
+                # Rolling buffer for recent lines
                 state["stderr_lines"].append(line_str)
                 
-                # Keep only last 100 lines to avoid memory growth
-                if len(state["stderr_lines"]) > 100:
+                # Keep last N lines to avoid memory growth while preserving more context
+                if len(state["stderr_lines"]) > STDERR_BUFFER_SIZE:
                     state["stderr_lines"].pop(0)
                 
                 # Parse progress using centralized parser
@@ -754,10 +770,35 @@ class TranscodeEngine:
         Monitor for stalls and cancellation with improved detection.
         
         Uses grace period before stall detection begins and checks
-        file growth as additional progress indicator.
+        file growth as additional progress indicator. Also detects
+        zombie processes that have exited but not been reaped.
         """
+        zombie_check_interval = 5  # Check for zombie every 5 iterations
+        iteration = 0
+        
         while process.returncode is None:
-            # Check cancellation
+            iteration += 1
+            
+            # Zombie process detection - check if process actually exited
+            # but returncode hasn't been updated (zombie state)
+            if iteration % zombie_check_interval == 0:
+                try:
+                    # Non-blocking check if process is still running
+                    if sys.platform != "win32":
+                        import os as os_module
+                        try:
+                            os_module.kill(process.pid, 0)  # Signal 0 = check existence
+                        except ProcessLookupError:
+                            # Process doesn't exist - zombie or exited
+                            logger.warning(f"{log_prefix} Process {process.pid} no longer exists (zombie)")
+                            state["stalled"] = True
+                            return
+                        except PermissionError:
+                            pass  # Process exists but we can't signal it
+                except Exception:
+                    pass  # Ignore errors in zombie detection
+            
+            # Check cancellation - terminate immediately
             if cancel_event and cancel_event.is_set():
                 state["cancelled"] = True
                 logger.info(f"{log_prefix} Cancellation requested, terminating FFmpeg")
@@ -1252,14 +1293,27 @@ class TranscodeEngine:
                 )
                 continue
             
-            # Transient error retry using proper error classification
-            if attempt < retry_count and self._is_transient_error(error_msg):
-                delay = RETRY_DELAY * (attempt + 1)
+            # Transient error retry using proper error classification with exponential backoff
+            if self._is_transient_error(error_msg):
+                # Calculate delay with exponential backoff and jitter
+                import random
+                base_delay = min(RETRY_DELAY * (2 ** attempt), MAX_RETRY_DELAY)
+                jitter = random.uniform(0, base_delay * 0.1)  # 10% jitter
+                delay = base_delay + jitter
                 desc = error_info.description if error_info else "Transient error"
-                logger.info(f"{log_prefix} {desc}, retrying in {delay}s...")
-                await asyncio.sleep(delay)
-                continue
+                
+                # For transient errors, keep retrying indefinitely if configured
+                if TRANSIENT_INFINITE_RETRY or attempt < retry_count:
+                    logger.info(f"{log_prefix} {desc}, retrying in {delay:.1f}s (attempt {attempt + 1})...")
+                    await asyncio.sleep(delay)
+                    # Don't increment attempt counter for infinite retry mode - reset loop
+                    if TRANSIENT_INFINITE_RETRY:
+                        # Clean partial output before retry
+                        await self._async_cleanup_dir(job_dir)
+                        continue
+                    continue
             
+            # Non-transient error or retry limit reached
             return False, f"FFmpeg error: {error_msg}", encoder_used
         
         return False, "Max retries exceeded", None
