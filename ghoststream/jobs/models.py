@@ -48,7 +48,11 @@ class Job:
             duration=self.duration,
             eta_seconds=self.eta_seconds,
             hw_accel_used=self.hw_accel_used,
-            error_message=self.error_message
+            error_message=self.error_message,
+            # Stream sharing info - critical for progress tracking
+            start_time=self.request.start_time,
+            is_shared=self.is_shared,
+            viewer_count=self.viewer_count
         )
     
     def to_status_response(self) -> JobStatusResponse:
@@ -65,5 +69,9 @@ class Job:
             error_message=self.error_message,
             created_at=self.created_at,
             started_at=self.started_at,
-            completed_at=self.completed_at
+            completed_at=self.completed_at,
+            # Stream sharing info - critical for progress tracking
+            start_time=self.request.start_time,
+            is_shared=self.is_shared,
+            viewer_count=self.viewer_count
         )

@@ -262,15 +262,19 @@ class JobManager:
     def _generate_stream_key(self, request: TranscodeRequest) -> str:
         """Generate a unique key for stream sharing based on source and output config."""
         # Create a hash of source + relevant output config for stream matching
+        # NOTE: start_time is intentionally EXCLUDED to allow joining streams at different positions
+        # The HLS playlist handles seeking - we don't need separate transcodes for different start times
         key_parts = [
-            request.source,
+            request.source.rstrip('/'),  # Normalize trailing slashes
             request.mode.value,
             request.output.format.value if request.output else "hls",
             request.output.resolution.value if request.output else "original",
-            str(request.start_time or 0),
+            # start_time excluded - stream sharing should work regardless of seek position
         ]
         key_string = "|".join(key_parts)
-        return hashlib.sha256(key_string.encode()).hexdigest()[:16]
+        stream_key = hashlib.sha256(key_string.encode()).hexdigest()[:16]
+        logger.debug(f"[StreamShare] Generated key {stream_key} for source: {request.source[:50]}...")
+        return stream_key
     
     def _is_stream_shareable(self, job: Job) -> bool:
         """Check if a job's stream can be shared with new viewers."""
@@ -337,9 +341,19 @@ class JobManager:
                         existing_job.last_accessed = datetime.utcnow()
                         return existing_job
                     else:
-                        # Stream no longer valid, remove from tracking
+                        # Stream no longer valid, remove from tracking and log why
+                        if existing_job:
+                            logger.info(
+                                f"[StreamShare] Existing job {existing_job_id} not shareable: "
+                                f"status={existing_job.status.value}, cleaned_up={existing_job.cleaned_up}, "
+                                f"cancelled={existing_job.cancel_event.is_set()}, progress={existing_job.progress}"
+                            )
+                        else:
+                            logger.info(f"[StreamShare] Job {existing_job_id} no longer exists in registry")
                         if stream_key in self._shared_streams:
                             del self._shared_streams[stream_key]
+                else:
+                    logger.debug(f"[StreamShare] No existing stream for key {stream_key}, creating new")
                 
                 # Create new job with stream sharing enabled
                 job_id = str(uuid.uuid4())

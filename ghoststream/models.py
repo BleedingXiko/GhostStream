@@ -100,6 +100,10 @@ class TranscodeResponse(BaseModel):
     # Extended info
     variants: Optional[List[Dict[str, Any]]] = Field(default=None, description="ABR quality variants")
     media_info: Optional[Dict[str, Any]] = Field(default=None, description="Source media information")
+    # Stream sharing info - critical for progress tracking
+    start_time: float = Field(default=0, description="Actual start time the transcode began at (may differ from requested for shared streams)")
+    is_shared: bool = Field(default=False, description="Whether this is a shared stream with other viewers")
+    viewer_count: int = Field(default=1, description="Number of viewers on this stream")
 
 
 class JobStatusResponse(BaseModel):
@@ -116,6 +120,10 @@ class JobStatusResponse(BaseModel):
     created_at: datetime
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+    # Stream sharing info - critical for progress tracking
+    start_time: float = Field(default=0, description="Actual start time the transcode began at")
+    is_shared: bool = Field(default=False, description="Whether this is a shared stream")
+    viewer_count: int = Field(default=1, description="Number of viewers on this stream")
 
 
 class HealthResponse(BaseModel):
