@@ -105,9 +105,11 @@ class GhostStreamDiscoveryListener(ServiceListener):
         self.on_removed = on_removed
     
     def add_service(self, zc: Zeroconf, type_: str, name: str) -> None:
+        logger.info(f"[mDNS] Discovered service: {name}")
         info = zc.get_service_info(type_, name)
         if info:
             addresses = [socket.inet_ntoa(addr) for addr in info.addresses]
+            logger.info(f"[mDNS] Service addresses: {addresses}, port: {info.port}")
             if addresses:
                 props = {
                     k.decode(): v.decode() if isinstance(v, bytes) else v
@@ -124,8 +126,12 @@ class GhostStreamDiscoveryListener(ServiceListener):
                     max_jobs=int(props.get("max_jobs", 2))
                 )
                 
-                logger.info(f"Found GhostStream: {server.host}:{server.port}")
+                logger.info(f"[mDNS] GhostStream server found: {server.host}:{server.port} (hw_accel: {server.has_hw_accel})")
                 self.on_found(server)
+            else:
+                logger.warning(f"[mDNS] Service {name} has no addresses")
+        else:
+            logger.warning(f"[mDNS] Could not get service info for {name}")
     
     def remove_service(self, zc: Zeroconf, type_: str, name: str) -> None:
         logger.info(f"GhostStream removed: {name}")
@@ -211,9 +217,11 @@ class GhostStreamClient:
     def start_discovery(self) -> None:
         """Start mDNS discovery for GhostStream servers."""
         if self._discovery_started:
+            logger.debug("Discovery already started")
             return
         
         try:
+            logger.info(f"[mDNS] Starting discovery for {GhostStreamDiscoveryListener.SERVICE_TYPE}")
             self.zeroconf = Zeroconf()
             listener = GhostStreamDiscoveryListener(
                 on_found=self._on_server_found,
@@ -225,9 +233,9 @@ class GhostStreamClient:
                 listener
             )
             self._discovery_started = True
-            logger.info("Started GhostStream discovery")
+            logger.info("[mDNS] Discovery started successfully - listening for GhostStream servers on the network")
         except Exception as e:
-            logger.error(f"Failed to start discovery: {e}")
+            logger.error(f"[mDNS] Failed to start discovery: {e}", exc_info=True)
     
     def stop_discovery(self) -> None:
         """Stop mDNS discovery."""
@@ -324,33 +332,48 @@ class GhostStreamClient:
         """
         server = server or self.get_server()
         if not server:
-            logger.error("No GhostStream server available")
-            return None
+            # Try to get any available server
+            if self.servers:
+                server = next(iter(self.servers.values()))
+                logger.info(f"[GhostStream] Using first available server: {server.name}")
+            else:
+                logger.error("[GhostStream] No servers available for transcoding")
+                return TranscodeJob(
+                    job_id="error",
+                    status=TranscodeStatus.ERROR,
+                    error_message="No GhostStream servers available. Add a server in Settings."
+                )
         
+        # Build request matching GhostStream's TranscodeRequest pydantic model exactly
         request_body = {
             "source": source,
-            "mode": mode,
+            "mode": mode,  # "stream" or "batch"
             "output": {
-                "format": format,
-                "video_codec": video_codec,
-                "audio_codec": audio_codec,
-                "resolution": resolution,
+                "format": format,        # "hls", "mp4", "webm", etc.
+                "video_codec": video_codec,  # "h264", "h265", "vp9", "av1", "copy"
+                "audio_codec": audio_codec,  # "aac", "opus", "mp3", "flac", "ac3", "copy"
+                "resolution": resolution,    # "4k", "1080p", "720p", "480p", "original"
                 "bitrate": bitrate,
-                "hw_accel": hw_accel
+                "hw_accel": hw_accel      # "auto", "nvenc", "qsv", "vaapi", "videotoolbox", "amf", "software"
             },
             "start_time": start_time
         }
         
+        logger.info(f"[GhostStream] Sending transcode request to {server.base_url}/api/transcode/start")
+        logger.info(f"[GhostStream] Request body: source={source[:80]}..., mode={mode}, resolution={resolution}")
+        
         try:
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(
                     f"{server.base_url}/api/transcode/start",
-                    json=request_body,
-                    timeout=30.0
+                    json=request_body
                 )
+                
+                logger.info(f"[GhostStream] Response status: {response.status_code}")
                 
                 if response.status_code == 200:
                     data = response.json()
+                    logger.info(f"[GhostStream] Job created: {data.get('job_id')}")
                     return TranscodeJob(
                         job_id=data["job_id"],
                         status=TranscodeStatus(data["status"]),
@@ -360,11 +383,34 @@ class GhostStreamClient:
                         hw_accel_used=data.get("hw_accel_used")
                     )
                 else:
-                    logger.error(f"Transcode request failed: {response.text}")
+                    error_text = response.text
+                    logger.error(f"[GhostStream] Transcode failed ({response.status_code}): {error_text[:300]}")
+                    return TranscodeJob(
+                        job_id="error",
+                        status=TranscodeStatus.ERROR,
+                        error_message=f"GhostStream error ({response.status_code}): {error_text[:200]}"
+                    )
+        except httpx.ConnectError as e:
+            logger.error(f"[GhostStream] Cannot connect to {server.base_url}: {e}")
+            return TranscodeJob(
+                job_id="error",
+                status=TranscodeStatus.ERROR,
+                error_message=f"Cannot connect to GhostStream at {server.host}:{server.port}"
+            )
+        except httpx.TimeoutException as e:
+            logger.error(f"[GhostStream] Request timed out to {server.base_url}: {e}")
+            return TranscodeJob(
+                job_id="error",
+                status=TranscodeStatus.ERROR,
+                error_message=f"Request to GhostStream timed out"
+            )
         except Exception as e:
-            logger.error(f"Transcode request error: {e}")
-        
-        return None
+            logger.error(f"[GhostStream] Transcode request error: {e}", exc_info=True)
+            return TranscodeJob(
+                job_id="error",
+                status=TranscodeStatus.ERROR,
+                error_message=str(e)
+            )
     
     async def get_job_status(
         self,
@@ -488,7 +534,8 @@ class GhostStreamLoadBalancer:
     def __init__(
         self,
         strategy: LoadBalanceStrategy = LoadBalanceStrategy.LEAST_BUSY,
-        manual_servers: Optional[List[str]] = None
+        manual_servers: Optional[List[str]] = None,
+        client: Optional[GhostStreamClient] = None
     ):
         """
         Initialize the load balancer.
@@ -496,9 +543,10 @@ class GhostStreamLoadBalancer:
         Args:
             strategy: How to distribute jobs across servers
             manual_servers: List of server addresses (e.g., ["192.168.4.2:8765", "192.168.4.3:8765"])
+            client: Optional existing GhostStreamClient to use (shares discovered servers)
         """
         self.strategy = strategy
-        self.client = GhostStreamClient()
+        self.client = client or GhostStreamClient()
         self.server_stats: Dict[str, ServerStats] = {}
         self._round_robin_index = 0
         self._stats_lock = asyncio.Lock()
@@ -569,16 +617,30 @@ class GhostStreamLoadBalancer:
         import random
         import time
         
-        # Refresh stats if stale (>10 seconds)
-        current_time = time.time()
-        needs_refresh = any(
-            current_time - s.last_health_check > 10
-            for s in self.server_stats.values()
-        )
-        if needs_refresh:
-            await self.refresh_stats()
+        logger.info(f"[LoadBalancer] Selecting server from {len(self.client.servers)} available")
         
-        # Get healthy servers
+        # If no servers, return None
+        if not self.client.servers:
+            logger.error("[LoadBalancer] No servers available")
+            return None
+        
+        # Ensure all servers have stats entries
+        for name in self.client.servers:
+            if name not in self.server_stats:
+                self.server_stats[name] = ServerStats()
+                logger.debug(f"[LoadBalancer] Created stats for server: {name}")
+        
+        # For speed, just use the first available server without health check
+        # Health check can cause delays and timeouts
+        server = next(iter(self.client.servers.values()))
+        logger.info(f"[LoadBalancer] Selected server: {server.name} ({server.host}:{server.port})")
+        return server
+    
+    async def _select_server_advanced(self) -> Optional[GhostStreamServer]:
+        """Advanced server selection with load balancing (unused for now)."""
+        import random
+        import time
+        
         healthy_servers = [
             (name, self.client.servers[name])
             for name, stats in self.server_stats.items()
@@ -586,9 +648,6 @@ class GhostStreamLoadBalancer:
         ]
         
         if not healthy_servers:
-            # Fallback to any available server
-            if self.client.servers:
-                return next(iter(self.client.servers.values()))
             return None
         
         if self.strategy == LoadBalanceStrategy.ROUND_ROBIN:
@@ -596,7 +655,6 @@ class GhostStreamLoadBalancer:
             return healthy_servers[self._round_robin_index][1]
         
         elif self.strategy == LoadBalanceStrategy.LEAST_BUSY:
-            # Pick server with lowest (active_jobs + queued_jobs)
             best_name = min(
                 healthy_servers,
                 key=lambda x: (
@@ -677,8 +735,12 @@ class GhostStreamLoadBalancer:
         """
         server = await self._select_server()
         if not server:
-            logger.error("No GhostStream servers available")
-            return None
+            logger.error("[LoadBalancer] No GhostStream servers available")
+            return TranscodeJob(
+                job_id="error",
+                status=TranscodeStatus.ERROR,
+                error_message="No healthy GhostStream servers available"
+            )
         
         logger.info(f"LoadBalancer: Sending job to {server.name} ({server.host})")
         
