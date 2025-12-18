@@ -6,7 +6,6 @@
   export let jobCount: number;
   export let isGhostHub: boolean = false;
   export let clientConnected: boolean = false;
-  export let displayAddress: string = 'localhost:8765';
 
   $: hwAccel = capabilities?.hw_accels?.find(h => h.available && h.type !== 'software');
   $: gpuName = hwAccel?.gpu_info?.name || 'Unknown GPU';
@@ -14,7 +13,7 @@
   
   $: statusText = clientConnected 
     ? (isGhostHub ? 'GhostHub Connected' : 'Client Connected')
-    : `Listening on ${displayAddress}`;
+    : 'Waiting for jobs';
   
   function formatUptime(seconds: number): string {
     const h = Math.floor(seconds / 3600);

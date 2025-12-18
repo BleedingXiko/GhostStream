@@ -12,8 +12,6 @@
   let capabilities: Capabilities | null = null;
   let jobs: Map<string, Job> = new Map();
   let clientConnected = false;
-  let showConnectedScreen = false;
-  let clientCount = 0;
   let isGhostHub = false;
   let localIp = 'localhost';
   let serverAddress = 'localhost:8765';
@@ -86,11 +84,15 @@
   }
 
   async function fetchCapabilities() {
-    try {
-      const capsJson: string = await invoke('get_capabilities');
-      capabilities = JSON.parse(capsJson) as Capabilities;
-    } catch (e) {
-      console.log('Could not fetch capabilities:', e);
+    // Retry quickly until capabilities are available
+    for (let i = 0; i < 30; i++) {
+      try {
+        const capsJson: string = await invoke('get_capabilities');
+        capabilities = JSON.parse(capsJson) as Capabilities;
+        return;
+      } catch (e) {
+        await new Promise(r => setTimeout(r, 200)); // Retry every 200ms
+      }
     }
   }
 
@@ -112,38 +114,8 @@
         return;
       }
 
-      // Handle client connect/disconnect events
-      if (msg.type === 'client_connected') {
-        clientCount = msg.data?.client_count || 1;
-        // Only show connected screen if this is a NEW client (count > 1, since GUI is always connected)
-        if (clientCount > 1 && !clientConnected) {
-          clientConnected = true;
-          showConnectedScreen = true;
-          // Auto-hide connected screen after 2 seconds
-          setTimeout(() => {
-            showConnectedScreen = false;
-          }, 2000);
-        }
-        return;
-      }
-
-      if (msg.type === 'client_disconnected') {
-        clientCount = msg.data?.client_count || 0;
-        if (clientCount <= 1) {
-          clientConnected = false;
-        }
-        return;
-      }
-
       if (msg.type === 'progress' && msg.job_id) {
-        // Job activity also means client is connected
-        if (!clientConnected) {
-          clientConnected = true;
-          showConnectedScreen = true;
-          setTimeout(() => {
-            showConnectedScreen = false;
-          }, 2000);
-        }
+        clientConnected = true;
         const existing = jobs.get(msg.job_id);
         jobs.set(msg.job_id, {
           id: msg.job_id,
@@ -158,13 +130,7 @@
       }
 
       if (msg.type === 'status_change' && msg.job_id) {
-        if (!clientConnected) {
-          clientConnected = true;
-          showConnectedScreen = true;
-          setTimeout(() => {
-            showConnectedScreen = false;
-          }, 2000);
-        }
+        clientConnected = true;
         const existing = jobs.get(msg.job_id);
         if (existing) {
           existing.status = msg.data.status;
@@ -213,21 +179,45 @@
   }
 
   function cleanupOldJobs() {
-    // Remove completed jobs older than 5 minutes to save memory
-    const fiveMinutesAgo = Date.now() - 5 * 60 * 1000;
+    const MAX_JOBS = 50;
+    const MAX_COMPLETED = 10;
+    const COMPLETED_TTL = 2 * 60 * 1000; // 2 minutes
+    
     const completedStatuses = ['ready', 'error', 'cancelled'];
+    const now = Date.now();
     let cleaned = 0;
     
+    // Remove completed jobs older than 2 minutes
     jobs.forEach((job, id) => {
-      if (completedStatuses.includes(job.status) && job.updatedAt < fiveMinutesAgo) {
+      if (completedStatuses.includes(job.status) && (now - job.updatedAt) > COMPLETED_TTL) {
         jobs.delete(id);
         cleaned++;
       }
     });
     
+    // If still too many completed jobs, keep only most recent
+    const completed = [...jobs.entries()]
+      .filter(([_, j]) => completedStatuses.includes(j.status))
+      .sort((a, b) => b[1].updatedAt - a[1].updatedAt);
+    
+    if (completed.length > MAX_COMPLETED) {
+      completed.slice(MAX_COMPLETED).forEach(([id]) => {
+        jobs.delete(id);
+        cleaned++;
+      });
+    }
+    
+    // Hard limit on total jobs
+    if (jobs.size > MAX_JOBS) {
+      const all = [...jobs.entries()].sort((a, b) => b[1].updatedAt - a[1].updatedAt);
+      all.slice(MAX_JOBS).forEach(([id]) => {
+        jobs.delete(id);
+        cleaned++;
+      });
+    }
+    
     if (cleaned > 0) {
       jobs = jobs;
-      console.log(`Cleaned up ${cleaned} old jobs`);
     }
   }
 
@@ -270,24 +260,13 @@
         </button>
       </div>
     </div>
-  {:else if serverState === 'starting'}
+  {:else if serverState === 'starting' || (serverState === 'running' && !capabilities)}
     <SearchingOverlay message="Starting server..." />
-  {:else if serverState === 'running'}
-    {#if !clientConnected}
-      <SearchingOverlay message="Searching for clients..." subtext="Listening on {displayAddress}" />
-    {:else if showConnectedScreen}
-      <div class="center-content">
-        <div class="connected-panel">
-          <img class="logo-big" src="/icons/Ghosthub192.png" alt="Connected" />
-          <h1 class="connected-title">{isGhostHub ? 'GhostHub Connected' : 'Client Connected'}</h1>
-        </div>
-      </div>
-    {:else}
-      <div class="content">
-        <StatusPanel {health} {capabilities} jobCount={activeJobs.length} {isGhostHub} {clientConnected} {displayAddress} />
-        <JobList jobs={jobList} />
-      </div>
-    {/if}
+  {:else if serverState === 'running' && capabilities}
+    <div class="content">
+      <StatusPanel {health} {capabilities} jobCount={activeJobs.length} {isGhostHub} {clientConnected} />
+      <JobList jobs={jobList} />
+    </div>
   {:else if serverState === 'stopping'}
     <SearchingOverlay message="Stopping server..." />
   {:else if serverState === 'error'}
@@ -322,35 +301,6 @@
   .start-panel, .error-panel {
     text-align: center;
     padding: 3rem;
-  }
-
-  .connected-panel {
-    text-align: center;
-    animation: fadeIn 0.3s ease-out;
-  }
-
-  .logo-big {
-    width: 120px;
-    height: 120px;
-    margin-bottom: 1.5rem;
-    animation: bounce 0.5s ease-out;
-  }
-
-  .connected-title {
-    font-size: 2rem;
-    font-weight: 700;
-    color: var(--success);
-  }
-
-  @keyframes fadeIn {
-    from { opacity: 0; transform: scale(0.9); }
-    to { opacity: 1; transform: scale(1); }
-  }
-
-  @keyframes bounce {
-    0% { transform: scale(0.5); }
-    50% { transform: scale(1.1); }
-    100% { transform: scale(1); }
   }
 
   .logo {

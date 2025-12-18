@@ -137,10 +137,6 @@ class WebSocketManager:
                 conn.send_task = asyncio.create_task(self._send_loop(conn))
                 
                 logger.info(f"[WS:{conn_id}] Connected. Total: {len(self._connections)}")
-                
-                # Broadcast client connected event
-                await self._broadcast_client_event("client_connected", len(self._connections))
-                
                 return conn
                 
             except Exception as e:
@@ -154,9 +150,6 @@ class WebSocketManager:
                 await self._close_connection(conn, "client_disconnect")
                 del self._connections[conn.id]
                 logger.info(f"[WS:{conn.id}] Disconnected. Total: {len(self._connections)}")
-                
-                # Broadcast client disconnected event
-                await self._broadcast_client_event("client_disconnected", len(self._connections))
     
     async def _close_connection(self, conn: WebSocketConnection, reason: str = "") -> None:
         """Internal: close a connection and cleanup resources."""
@@ -253,17 +246,6 @@ class WebSocketManager:
                 sent_count += 1
         
         return sent_count
-    
-    async def _broadcast_client_event(self, event_type: str, client_count: int) -> None:
-        """Broadcast client connect/disconnect events to all connections."""
-        message = {
-            "type": event_type,
-            "data": {
-                "client_count": client_count,
-                "timestamp": time.time()
-            }
-        }
-        await self.broadcast(message)
     
     async def handle_message(self, conn: WebSocketConnection, data: str) -> None:
         """Handle incoming message from client."""
