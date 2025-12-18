@@ -89,3 +89,4 @@ transcode_temp/
 *.pem
 *.key
 secrets.yaml
+.pypirc

@@ -40,18 +40,29 @@ docker run -d -p 8765:8765 ghcr.io/bleedingxiko/ghoststream
 docker run -d -p 8765:8765 --gpus all ghcr.io/bleedingxiko/ghoststream:nvidia
 ```
 
+## SDK Installation
+
+```bash
+pip install ghoststream              # SDK only (lightweight)
+pip install ghoststream[server]      # Full server with all dependencies
+```
+
 ## Usage
 
-**Python:**
+**Python SDK (recommended):**
 ```python
-import httpx
+from ghoststream import GhostStreamClient, TranscodeStatus
 
-response = httpx.post("http://localhost:8765/api/transcode/start", json={
-    "source": "https://example.com/video.mp4",
-    "mode": "stream"
-})
-job = response.json()
-print(f"Stream URL: {job['stream_url']}")
+client = GhostStreamClient(manual_server="localhost:8765")
+
+# Synchronous (Flask/gevent compatible)
+job = client.transcode_sync(source="https://example.com/video.mp4", resolution="720p")
+print(f"Stream URL: {job.stream_url}")
+
+# Or async
+async with GhostStreamClient(manual_server="localhost:8765") as client:
+    job = await client.transcode(source="https://example.com/video.mp4")
+    print(f"Stream URL: {job.stream_url}")
 ```
 
 **curl:**
@@ -176,10 +187,14 @@ GhostStream serves as the transcoding backend for [GhostHub](https://ghosthub.ne
 - **On-Demand**: Transcoding occurs only when requested
 - **Local Network**: No internet connection required
 
-### Python Client
+### Python SDK
+
+```bash
+pip install ghoststream
+```
 
 ```python
-from ghoststream.client import GhostStreamClient
+from ghoststream import GhostStreamClient, TranscodeStatus
 
 # Auto-discover on network
 client = GhostStreamClient()
@@ -188,13 +203,16 @@ client.start_discovery()
 # Or connect directly
 client = GhostStreamClient(manual_server="192.168.1.100:8765")
 
-# Transcode
-if client.is_available():
-    job = await client.transcode(
-        source="http://pi:5000/media/video.mkv",
-        resolution="1080p"
-    )
+# Synchronous API (Flask/gevent compatible)
+job = client.transcode_sync(
+    source="http://pi:5000/media/video.mkv",
+    resolution="1080p"
+)
+if job.status != TranscodeStatus.ERROR:
     print(job.stream_url)
+
+# Async API
+job = await client.transcode(source="http://pi:5000/media/video.mkv")
 ```
 
 ### WebSocket Progress

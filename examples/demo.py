@@ -26,16 +26,20 @@ import webbrowser
 from typing import Optional
 
 try:
-    import httpx
+    from ghoststream import GhostStreamClient, TranscodeStatus
 except ImportError:
-    print("❌ Missing dependency: httpx")
-    print("   Install with: pip install httpx")
+    print("❌ Missing dependency: ghoststream SDK")
+    print("   Install with: pip install ghoststream")
+    print("   Or run from project root: pip install -e .")
     sys.exit(1)
 
 # Configuration
-GHOSTSTREAM_URL = "http://localhost:8765"
+GHOSTSTREAM_SERVER = "localhost:8765"
 TEST_VIDEO = "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_1MB.mp4"
 TEST_VIDEO_DURATION = "10 seconds"  # Note: This is a short demo clip
+
+# Create SDK client
+client = GhostStreamClient(manual_server=GHOSTSTREAM_SERVER)
 
 # Global for cleanup
 current_job_id: Optional[str] = None
@@ -46,7 +50,7 @@ def cleanup(sig=None, frame=None):
     if current_job_id:
         print(f"\n🧹 Cleaning up job {current_job_id[:8]}...")
         try:
-            httpx.delete(f"{GHOSTSTREAM_URL}/api/transcode/{current_job_id}", timeout=5)
+            client.delete_job_sync(current_job_id)
             print("✅ Cleaned up")
         except Exception:
             pass
@@ -79,31 +83,27 @@ def check_server() -> bool:
     """Check if GhostStream is running."""
     print("🔍 Checking GhostStream server...", end=" ", flush=True)
     try:
-        resp = httpx.get(f"{GHOSTSTREAM_URL}/api/health", timeout=5)
-        data = resp.json()
+        if not client.health_check_sync():
+            print("❌ Failed")
+            print()
+            print("   GhostStream is not running!")
+            print("   Start it with: python run.py")
+            print()
+            return False
+        
         print(f"✅ Connected!")
-        print(f"   Version: {data.get('version', 'unknown')}")
-        print(f"   Active jobs: {data.get('current_jobs', 0)}")
         
         # Also get hardware info
-        try:
-            caps = httpx.get(f"{GHOSTSTREAM_URL}/api/capabilities", timeout=5).json()
+        caps = client.get_capabilities_sync()
+        if caps:
+            print(f"   Version: {caps.get('version', 'unknown')}")
             hw_accels = [h['type'] for h in caps.get('hw_accels', []) if h.get('available')]
             if hw_accels:
                 print(f"   Hardware: {', '.join(hw_accels).upper()}")
             else:
                 print(f"   Hardware: Software (CPU)")
-        except Exception:
-            pass
         
         return True
-    except httpx.ConnectError:
-        print("❌ Failed")
-        print()
-        print("   GhostStream is not running!")
-        print("   Start it with: python run.py")
-        print()
-        return False
     except Exception as e:
         print(f"❌ Error: {e}")
         return False
@@ -118,25 +118,18 @@ def start_transcode() -> Optional[str]:
     print(f"   Source: Big Buck Bunny ({TEST_VIDEO_DURATION} demo clip)")
     
     try:
-        resp = httpx.post(
-            f"{GHOSTSTREAM_URL}/api/transcode/start",
-            json={
-                "source": TEST_VIDEO,
-                "mode": "stream",
-                "output": {
-                    "resolution": "720p",
-                    "video_codec": "h264"
-                }
-            },
-            timeout=30
+        job = client.transcode_sync(
+            source=TEST_VIDEO,
+            mode="stream",
+            resolution="720p",
+            video_codec="h264"
         )
         
-        if resp.status_code != 200:
-            print(f"❌ Failed: {resp.text[:100]}")
+        if job.status == TranscodeStatus.ERROR:
+            print(f"❌ Failed: {job.error_message}")
             return None
         
-        job = resp.json()
-        current_job_id = job["job_id"]
+        current_job_id = job.job_id
         print(f"   Job ID: {current_job_id[:8]}...")
         return current_job_id
         
@@ -152,19 +145,18 @@ def wait_for_ready(job_id: str) -> Optional[str]:
     
     spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
     spin_idx = 0
-    last_status = ""
     
     for attempt in range(120):  # 2 minute timeout
         try:
-            resp = httpx.get(
-                f"{GHOSTSTREAM_URL}/api/transcode/{job_id}/status",
-                timeout=10
-            )
-            data = resp.json()
+            job = client.get_job_status_sync(job_id)
             
-            status = data.get("status", "unknown")
-            progress = data.get("progress", 0)
-            hw_accel = data.get("hw_accel_used", "pending")
+            if not job:
+                time.sleep(1)
+                continue
+            
+            status = job.status.value
+            progress = job.progress
+            hw_accel = job.hw_accel_used or "pending"
             
             # Build progress bar
             bar_width = 30
@@ -176,26 +168,26 @@ def wait_for_ready(job_id: str) -> Optional[str]:
             print(f"   {spinner[spin_idx]} [{bar}] {progress:5.1f}% | {status.upper()} | HW: {hw_accel}", end="", flush=True)
             spin_idx = (spin_idx + 1) % len(spinner)
             
-            if status == "ready":
+            if job.status == TranscodeStatus.READY:
                 clear_line()
                 print(f"   ✅ [{bar}] 100.0% | READY | HW: {hw_accel}")
-                return data.get("stream_url")
+                return job.stream_url
             
-            elif status == "error":
+            elif job.status == TranscodeStatus.ERROR:
                 clear_line()
-                print(f"   ❌ Error: {data.get('error_message', 'Unknown error')}")
+                print(f"   ❌ Error: {job.error_message or 'Unknown error'}")
                 return None
             
-            elif status == "cancelled":
+            elif job.status == TranscodeStatus.CANCELLED:
                 clear_line()
                 print(f"   ⚠️ Job was cancelled")
                 return None
             
             # For streaming, we can play as soon as we have a URL and it's processing
-            if status == "processing" and data.get("stream_url") and progress > 5:
+            if job.status == TranscodeStatus.PROCESSING and job.stream_url and progress > 5:
                 clear_line()
                 print(f"   ✅ [{bar}] {progress:5.1f}% | STREAMING | HW: {hw_accel}")
-                return data.get("stream_url")
+                return job.stream_url
             
             time.sleep(0.5)
             

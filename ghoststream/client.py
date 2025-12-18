@@ -19,15 +19,38 @@ Usage in GhostHub:
 
 import asyncio
 import logging
-from typing import Optional, Dict, Any, List, Callable
-from dataclasses import dataclass
+import random
+import time
+import json
+import threading
+from typing import Optional, Dict, Any, List, Callable, AsyncIterator
+from dataclasses import dataclass, field
 from enum import Enum
+from contextlib import asynccontextmanager
 
 import httpx
 from zeroconf import ServiceBrowser, ServiceListener, Zeroconf
 import socket
 
+try:
+    import websockets
+    HAS_WEBSOCKETS = True
+except ImportError:
+    HAS_WEBSOCKETS = False
+
 logger = logging.getLogger(__name__)
+
+
+# Default timeout configuration
+DEFAULT_CONNECT_TIMEOUT = 10.0
+DEFAULT_READ_TIMEOUT = 30.0
+DEFAULT_WRITE_TIMEOUT = 30.0
+
+# Retry configuration
+DEFAULT_MAX_RETRIES = 3
+DEFAULT_RETRY_DELAY = 1.0
+DEFAULT_RETRY_MAX_DELAY = 30.0
+DEFAULT_RETRY_MULTIPLIER = 2.0
 
 
 class LoadBalanceStrategy(str, Enum):
@@ -141,27 +164,68 @@ class GhostStreamDiscoveryListener(ServiceListener):
         self.add_service(zc, type_, name)
 
 
+@dataclass
+class ClientConfig:
+    """
+    Configuration for GhostStreamClient.
+    
+    All parameters are optional with sensible defaults for backward compatibility.
+    """
+    connect_timeout: float = DEFAULT_CONNECT_TIMEOUT
+    read_timeout: float = DEFAULT_READ_TIMEOUT
+    write_timeout: float = DEFAULT_WRITE_TIMEOUT
+    max_retries: int = DEFAULT_MAX_RETRIES
+    retry_delay: float = DEFAULT_RETRY_DELAY
+    retry_max_delay: float = DEFAULT_RETRY_MAX_DELAY
+    retry_multiplier: float = DEFAULT_RETRY_MULTIPLIER
+    retry_on_status: List[int] = field(default_factory=lambda: [502, 503, 504])
+
+
 class GhostStreamClient:
     """
     Client for discovering and using GhostStream transcoding services.
     
     Designed for integration with GhostHub and other media servers.
+    
+    Features:
+    - Connection pooling for efficient HTTP requests
+    - Automatic retry with exponential backoff
+    - WebSocket support for real-time progress updates
+    - ABR (Adaptive Bitrate) streaming mode
+    - Context manager support for proper cleanup
+    
+    Backward Compatible: All existing code will work without changes.
     """
     
-    def __init__(self, manual_server: Optional[str] = None):
+    def __init__(
+        self,
+        manual_server: Optional[str] = None,
+        config: Optional[ClientConfig] = None
+    ):
         """
         Initialize the client.
         
         Args:
             manual_server: Optional manual server address (e.g., "192.168.4.2:8765")
                           If provided, skips mDNS discovery.
+            config: Optional configuration for timeouts and retries.
+                   If not provided, uses sensible defaults.
         """
+        self.config = config or ClientConfig()
         self.servers: Dict[str, GhostStreamServer] = {}
         self.preferred_server: Optional[str] = None
         self.zeroconf: Optional[Zeroconf] = None
         self.browser: Optional[ServiceBrowser] = None
         self._discovery_started = False
         self._callbacks: List[Callable[[str, GhostStreamServer], None]] = []
+        
+        # Connection pool - reused across requests
+        self._http_client: Optional[httpx.AsyncClient] = None
+        self._client_lock = asyncio.Lock()
+        
+        # Synchronous HTTP client (for gevent/Flask compatibility)
+        self._sync_http_client: Optional[httpx.Client] = None
+        self._sync_client_lock = threading.Lock()
         
         # If manual server provided, add it directly
         if manual_server:
@@ -172,6 +236,459 @@ class GhostStreamClient:
                 port=int(port)
             )
             self.preferred_server = "manual"
+    
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Get or create the shared HTTP client (connection pooling)."""
+        async with self._client_lock:
+            if self._http_client is None or self._http_client.is_closed:
+                timeout = httpx.Timeout(
+                    connect=self.config.connect_timeout,
+                    read=self.config.read_timeout,
+                    write=self.config.write_timeout,
+                    pool=self.config.connect_timeout
+                )
+                self._http_client = httpx.AsyncClient(
+                    timeout=timeout,
+                    limits=httpx.Limits(max_connections=100, max_keepalive_connections=20)
+                )
+            return self._http_client
+    
+    async def close(self) -> None:
+        """Close the HTTP client and release resources."""
+        async with self._client_lock:
+            if self._http_client and not self._http_client.is_closed:
+                await self._http_client.aclose()
+                self._http_client = None
+        self.close_sync()
+        self.stop_discovery()
+    
+    # =========================================================================
+    # Synchronous API (for gevent/Flask compatibility)
+    # =========================================================================
+    
+    def _get_sync_client(self) -> httpx.Client:
+        """Get or create the shared synchronous HTTP client (connection pooling)."""
+        with self._sync_client_lock:
+            if self._sync_http_client is None or self._sync_http_client.is_closed:
+                timeout = httpx.Timeout(
+                    connect=self.config.connect_timeout,
+                    read=self.config.read_timeout,
+                    write=self.config.write_timeout,
+                    pool=self.config.connect_timeout
+                )
+                self._sync_http_client = httpx.Client(
+                    timeout=timeout,
+                    limits=httpx.Limits(max_connections=100, max_keepalive_connections=20)
+                )
+            return self._sync_http_client
+    
+    def close_sync(self) -> None:
+        """Close the synchronous HTTP client."""
+        with self._sync_client_lock:
+            if self._sync_http_client and not self._sync_http_client.is_closed:
+                self._sync_http_client.close()
+                self._sync_http_client = None
+    
+    def _request_sync_with_retry(
+        self,
+        method: str,
+        url: str,
+        **kwargs
+    ) -> httpx.Response:
+        """
+        Make synchronous HTTP request with automatic retry on transient failures.
+        
+        Uses exponential backoff with jitter. Gevent-compatible.
+        """
+        client = self._get_sync_client()
+        last_exception = None
+        delay = self.config.retry_delay
+        
+        for attempt in range(self.config.max_retries + 1):
+            try:
+                response = client.request(method, url, **kwargs)
+                
+                # Retry on specific status codes
+                if response.status_code in self.config.retry_on_status:
+                    if attempt < self.config.max_retries:
+                        logger.warning(
+                            f"[GhostStream] Request returned {response.status_code}, "
+                            f"retrying ({attempt + 1}/{self.config.max_retries})..."
+                        )
+                        time.sleep(delay + random.uniform(0, 1))
+                        delay = min(delay * self.config.retry_multiplier, self.config.retry_max_delay)
+                        continue
+                
+                return response
+                
+            except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+                last_exception = e
+                if attempt < self.config.max_retries:
+                    logger.warning(
+                        f"[GhostStream] Connection failed, retrying ({attempt + 1}/{self.config.max_retries})..."
+                    )
+                    time.sleep(delay + random.uniform(0, 1))
+                    delay = min(delay * self.config.retry_multiplier, self.config.retry_max_delay)
+                else:
+                    raise
+            except httpx.TimeoutException as e:
+                last_exception = e
+                if attempt < self.config.max_retries:
+                    logger.warning(
+                        f"[GhostStream] Request timed out, retrying ({attempt + 1}/{self.config.max_retries})..."
+                    )
+                    time.sleep(delay)
+                    delay = min(delay * self.config.retry_multiplier, self.config.retry_max_delay)
+                else:
+                    raise
+        
+        if last_exception:
+            raise last_exception
+        raise RuntimeError("Unexpected retry loop exit")
+    
+    def health_check_sync(self, server: Optional[GhostStreamServer] = None) -> bool:
+        """Check if a server is healthy (synchronous)."""
+        server = server or self.get_server()
+        if not server:
+            return False
+        
+        try:
+            response = self._request_sync_with_retry(
+                "GET",
+                f"{server.base_url}/api/health"
+            )
+            return response.status_code == 200
+        except Exception:
+            return False
+    
+    def get_capabilities_sync(self, server: Optional[GhostStreamServer] = None) -> Optional[Dict]:
+        """Get server capabilities (synchronous)."""
+        server = server or self.get_server()
+        if not server:
+            return None
+        
+        try:
+            response = self._request_sync_with_retry(
+                "GET",
+                f"{server.base_url}/api/capabilities"
+            )
+            if response.status_code == 200:
+                return response.json()
+        except Exception as e:
+            logger.error(f"Failed to get capabilities: {e}")
+        
+        return None
+    
+    def transcode_sync(
+        self,
+        source: str,
+        mode: str = "stream",
+        format: str = "hls",
+        video_codec: str = "h264",
+        audio_codec: str = "aac",
+        resolution: str = "original",
+        bitrate: str = "auto",
+        hw_accel: str = "auto",
+        start_time: float = 0,
+        tone_map: bool = True,
+        two_pass: bool = False,
+        max_audio_channels: int = 2,
+        session_id: Optional[str] = None,
+        server: Optional[GhostStreamServer] = None
+    ) -> Optional[TranscodeJob]:
+        """
+        Start a transcoding job (synchronous, gevent-compatible).
+        
+        Args:
+            source: Source file URL (accessible from GhostStream server)
+            mode: Transcoding mode ("stream", "abr", "batch")
+            format: Output format (hls, mp4, webm, etc.)
+            video_codec: Video codec (h264, h265, vp9, av1)
+            audio_codec: Audio codec (aac, opus, copy)
+            resolution: Target resolution (4k, 1080p, 720p, 480p, original)
+            bitrate: Target bitrate or "auto"
+            hw_accel: Hardware acceleration (auto, nvenc, qsv, software)
+            start_time: Start position in seconds
+            tone_map: Convert HDR to SDR automatically
+            two_pass: Use two-pass encoding for batch mode
+            max_audio_channels: Max audio channels (2=stereo, 6=5.1)
+            session_id: Session ID for job tracking
+            server: Specific server to use
+        
+        Returns:
+            TranscodeJob with stream_url for playback
+        """
+        server = server or self.get_server()
+        if not server:
+            if self.servers:
+                server = next(iter(self.servers.values()))
+                logger.info(f"[GhostStream] Using first available server: {server.name}")
+            else:
+                logger.error("[GhostStream] No servers available for transcoding")
+                return TranscodeJob(
+                    job_id="error",
+                    status=TranscodeStatus.ERROR,
+                    error_message="No GhostStream servers available. Add a server in Settings."
+                )
+        
+        request_body = {
+            "source": source,
+            "mode": mode,
+            "output": {
+                "format": format,
+                "video_codec": video_codec,
+                "audio_codec": audio_codec,
+                "resolution": resolution,
+                "bitrate": bitrate,
+                "hw_accel": hw_accel,
+                "tone_map": tone_map,
+                "two_pass": two_pass,
+                "max_audio_channels": max_audio_channels
+            },
+            "start_time": start_time,
+            "session_id": session_id
+        }
+        
+        logger.info(f"[GhostStream] Sending transcode request to {server.base_url}/api/transcode/start")
+        logger.info(f"[GhostStream] Request: source={source[:80]}..., mode={mode}, resolution={resolution}")
+        
+        try:
+            response = self._request_sync_with_retry(
+                "POST",
+                f"{server.base_url}/api/transcode/start",
+                json=request_body
+            )
+            
+            logger.info(f"[GhostStream] Response status: {response.status_code}")
+            
+            if response.status_code == 200:
+                data = response.json()
+                logger.info(f"[GhostStream] Job created: {data.get('job_id')}")
+                return TranscodeJob(
+                    job_id=data["job_id"],
+                    status=TranscodeStatus(data["status"]),
+                    progress=data.get("progress", 0),
+                    stream_url=data.get("stream_url"),
+                    download_url=data.get("download_url"),
+                    hw_accel_used=data.get("hw_accel_used")
+                )
+            else:
+                error_text = response.text
+                logger.error(f"[GhostStream] Transcode failed ({response.status_code}): {error_text[:300]}")
+                return TranscodeJob(
+                    job_id="error",
+                    status=TranscodeStatus.ERROR,
+                    error_message=f"GhostStream error ({response.status_code}): {error_text[:200]}"
+                )
+        except httpx.ConnectError as e:
+            logger.error(f"[GhostStream] Cannot connect to {server.base_url}: {e}")
+            return TranscodeJob(
+                job_id="error",
+                status=TranscodeStatus.ERROR,
+                error_message=f"Cannot connect to GhostStream at {server.host}:{server.port}"
+            )
+        except httpx.TimeoutException as e:
+            logger.error(f"[GhostStream] Request timed out to {server.base_url}: {e}")
+            return TranscodeJob(
+                job_id="error",
+                status=TranscodeStatus.ERROR,
+                error_message="Request to GhostStream timed out"
+            )
+        except Exception as e:
+            logger.error(f"[GhostStream] Transcode request error: {e}", exc_info=True)
+            return TranscodeJob(
+                job_id="error",
+                status=TranscodeStatus.ERROR,
+                error_message=str(e)
+            )
+    
+    def get_job_status_sync(
+        self,
+        job_id: str,
+        server: Optional[GhostStreamServer] = None
+    ) -> Optional[TranscodeJob]:
+        """Get the status of a transcoding job (synchronous)."""
+        server = server or self.get_server()
+        if not server:
+            return None
+        
+        try:
+            response = self._request_sync_with_retry(
+                "GET",
+                f"{server.base_url}/api/transcode/{job_id}/status"
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                return TranscodeJob(
+                    job_id=data["job_id"],
+                    status=TranscodeStatus(data["status"]),
+                    progress=data.get("progress", 0),
+                    stream_url=data.get("stream_url"),
+                    download_url=data.get("download_url"),
+                    error_message=data.get("error_message"),
+                    hw_accel_used=data.get("hw_accel_used")
+                )
+        except Exception as e:
+            logger.error(f"Status request error: {e}")
+        
+        return None
+    
+    def cancel_job_sync(
+        self,
+        job_id: str,
+        server: Optional[GhostStreamServer] = None
+    ) -> bool:
+        """Cancel a transcoding job (synchronous)."""
+        server = server or self.get_server()
+        if not server:
+            return False
+        
+        try:
+            response = self._request_sync_with_retry(
+                "POST",
+                f"{server.base_url}/api/transcode/{job_id}/cancel"
+            )
+            return response.status_code == 200
+        except Exception as e:
+            logger.error(f"Cancel request error: {e}")
+        
+        return False
+    
+    def delete_job_sync(
+        self,
+        job_id: str,
+        server: Optional[GhostStreamServer] = None
+    ) -> bool:
+        """Delete a transcoding job and its files (synchronous)."""
+        server = server or self.get_server()
+        if not server:
+            return False
+        
+        try:
+            response = self._request_sync_with_retry(
+                "DELETE",
+                f"{server.base_url}/api/transcode/{job_id}"
+            )
+            return response.status_code == 200
+        except Exception as e:
+            logger.error(f"Delete request error: {e}")
+        
+        return False
+    
+    def wait_for_ready_sync(
+        self,
+        job_id: str,
+        timeout: float = 300,
+        poll_interval: float = 1.0,
+        server: Optional[GhostStreamServer] = None
+    ) -> Optional[TranscodeJob]:
+        """
+        Wait for a job to be ready for streaming (synchronous).
+        
+        For live transcoding (HLS), the job becomes ready quickly
+        as segments are generated.
+        """
+        server = server or self.get_server()
+        if not server:
+            return None
+        
+        elapsed = 0
+        while elapsed < timeout:
+            job = self.get_job_status_sync(job_id, server)
+            
+            if job is None:
+                return None
+            
+            if job.status == TranscodeStatus.READY:
+                return job
+            
+            if job.status == TranscodeStatus.ERROR:
+                logger.error(f"Job failed: {job.error_message}")
+                return job
+            
+            if job.status == TranscodeStatus.CANCELLED:
+                return job
+            
+            # For streaming mode, return as soon as we have a stream URL
+            if job.stream_url and job.status == TranscodeStatus.PROCESSING:
+                return job
+            
+            time.sleep(poll_interval)
+            elapsed += poll_interval
+        
+        logger.error(f"Timeout waiting for job {job_id}")
+        return None
+    
+    # =========================================================================
+    # Async API
+    # =========================================================================
+    
+    async def __aenter__(self) -> "GhostStreamClient":
+        """Context manager entry."""
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Context manager exit - cleanup resources."""
+        await self.close()
+    
+    async def _request_with_retry(
+        self,
+        method: str,
+        url: str,
+        **kwargs
+    ) -> httpx.Response:
+        """
+        Make HTTP request with automatic retry on transient failures.
+        
+        Uses exponential backoff with jitter.
+        """
+        client = await self._get_client()
+        last_exception = None
+        delay = self.config.retry_delay
+        
+        for attempt in range(self.config.max_retries + 1):
+            try:
+                response = await client.request(method, url, **kwargs)
+                
+                # Retry on specific status codes
+                if response.status_code in self.config.retry_on_status:
+                    if attempt < self.config.max_retries:
+                        logger.warning(
+                            f"[GhostStream] Request returned {response.status_code}, "
+                            f"retrying ({attempt + 1}/{self.config.max_retries})..."
+                        )
+                        await asyncio.sleep(delay + random.uniform(0, 1))
+                        delay = min(delay * self.config.retry_multiplier, self.config.retry_max_delay)
+                        continue
+                
+                return response
+                
+            except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+                last_exception = e
+                if attempt < self.config.max_retries:
+                    logger.warning(
+                        f"[GhostStream] Connection failed, retrying ({attempt + 1}/{self.config.max_retries})..."
+                    )
+                    await asyncio.sleep(delay + random.uniform(0, 1))
+                    delay = min(delay * self.config.retry_multiplier, self.config.retry_max_delay)
+                else:
+                    raise
+            except httpx.TimeoutException as e:
+                last_exception = e
+                if attempt < self.config.max_retries:
+                    logger.warning(
+                        f"[GhostStream] Request timed out, retrying ({attempt + 1}/{self.config.max_retries})..."
+                    )
+                    await asyncio.sleep(delay)
+                    delay = min(delay * self.config.retry_multiplier, self.config.retry_max_delay)
+                else:
+                    raise
+        
+        # Should not reach here, but just in case
+        if last_exception:
+            raise last_exception
+        raise RuntimeError("Unexpected retry loop exit")
     
     def add_callback(self, callback: Callable[[str, GhostStreamServer], None]) -> None:
         """
@@ -271,12 +788,11 @@ class GhostStreamClient:
             return False
         
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{server.base_url}/api/health",
-                    timeout=5.0
-                )
-                return response.status_code == 200
+            response = await self._request_with_retry(
+                "GET",
+                f"{server.base_url}/api/health"
+            )
+            return response.status_code == 200
         except Exception:
             return False
     
@@ -287,13 +803,12 @@ class GhostStreamClient:
             return None
         
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{server.base_url}/api/capabilities",
-                    timeout=10.0
-                )
-                if response.status_code == 200:
-                    return response.json()
+            response = await self._request_with_retry(
+                "GET",
+                f"{server.base_url}/api/capabilities"
+            )
+            if response.status_code == 200:
+                return response.json()
         except Exception as e:
             logger.error(f"Failed to get capabilities: {e}")
         
@@ -317,7 +832,10 @@ class GhostStreamClient:
         
         Args:
             source: Source file URL (accessible from GhostStream server)
-            mode: "stream" for live HLS, "batch" for file output
+            mode: Transcoding mode:
+                  - "stream": Single quality HLS streaming (default)
+                  - "abr": Adaptive Bitrate with multiple quality variants
+                  - "batch": File output (MP4, etc.)
             format: Output format (hls, mp4, webm, etc.)
             video_codec: Video codec (h264, h265, vp9, av1)
             audio_codec: Audio codec (aac, opus, copy)
@@ -329,6 +847,13 @@ class GhostStreamClient:
         
         Returns:
             TranscodeJob with stream_url for playback
+        
+        Example:
+            # Standard streaming
+            job = await client.transcode(source="http://...", mode="stream")
+            
+            # Adaptive bitrate (Netflix-style multiple qualities)
+            job = await client.transcode(source="http://...", mode="abr")
         """
         server = server or self.get_server()
         if not server:
@@ -363,33 +888,33 @@ class GhostStreamClient:
         logger.info(f"[GhostStream] Request body: source={source[:80]}..., mode={mode}, resolution={resolution}")
         
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    f"{server.base_url}/api/transcode/start",
-                    json=request_body
+            response = await self._request_with_retry(
+                "POST",
+                f"{server.base_url}/api/transcode/start",
+                json=request_body
+            )
+            
+            logger.info(f"[GhostStream] Response status: {response.status_code}")
+            
+            if response.status_code == 200:
+                data = response.json()
+                logger.info(f"[GhostStream] Job created: {data.get('job_id')}")
+                return TranscodeJob(
+                    job_id=data["job_id"],
+                    status=TranscodeStatus(data["status"]),
+                    progress=data.get("progress", 0),
+                    stream_url=data.get("stream_url"),
+                    download_url=data.get("download_url"),
+                    hw_accel_used=data.get("hw_accel_used")
                 )
-                
-                logger.info(f"[GhostStream] Response status: {response.status_code}")
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    logger.info(f"[GhostStream] Job created: {data.get('job_id')}")
-                    return TranscodeJob(
-                        job_id=data["job_id"],
-                        status=TranscodeStatus(data["status"]),
-                        progress=data.get("progress", 0),
-                        stream_url=data.get("stream_url"),
-                        download_url=data.get("download_url"),
-                        hw_accel_used=data.get("hw_accel_used")
-                    )
-                else:
-                    error_text = response.text
-                    logger.error(f"[GhostStream] Transcode failed ({response.status_code}): {error_text[:300]}")
-                    return TranscodeJob(
-                        job_id="error",
-                        status=TranscodeStatus.ERROR,
-                        error_message=f"GhostStream error ({response.status_code}): {error_text[:200]}"
-                    )
+            else:
+                error_text = response.text
+                logger.error(f"[GhostStream] Transcode failed ({response.status_code}): {error_text[:300]}")
+                return TranscodeJob(
+                    job_id="error",
+                    status=TranscodeStatus.ERROR,
+                    error_message=f"GhostStream error ({response.status_code}): {error_text[:200]}"
+                )
         except httpx.ConnectError as e:
             logger.error(f"[GhostStream] Cannot connect to {server.base_url}: {e}")
             return TranscodeJob(
@@ -423,23 +948,22 @@ class GhostStreamClient:
             return None
         
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{server.base_url}/api/transcode/{job_id}/status",
-                    timeout=10.0
+            response = await self._request_with_retry(
+                "GET",
+                f"{server.base_url}/api/transcode/{job_id}/status"
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                return TranscodeJob(
+                    job_id=data["job_id"],
+                    status=TranscodeStatus(data["status"]),
+                    progress=data.get("progress", 0),
+                    stream_url=data.get("stream_url"),
+                    download_url=data.get("download_url"),
+                    error_message=data.get("error_message"),
+                    hw_accel_used=data.get("hw_accel_used")
                 )
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    return TranscodeJob(
-                        job_id=data["job_id"],
-                        status=TranscodeStatus(data["status"]),
-                        progress=data.get("progress", 0),
-                        stream_url=data.get("stream_url"),
-                        download_url=data.get("download_url"),
-                        error_message=data.get("error_message"),
-                        hw_accel_used=data.get("hw_accel_used")
-                    )
         except Exception as e:
             logger.error(f"Status request error: {e}")
         
@@ -456,29 +980,125 @@ class GhostStreamClient:
             return False
         
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{server.base_url}/api/transcode/{job_id}/cancel",
-                    timeout=10.0
-                )
-                return response.status_code == 200
+            response = await self._request_with_retry(
+                "POST",
+                f"{server.base_url}/api/transcode/{job_id}/cancel"
+            )
+            return response.status_code == 200
         except Exception as e:
             logger.error(f"Cancel request error: {e}")
         
         return False
+    
+    async def delete_job(
+        self,
+        job_id: str,
+        server: Optional[GhostStreamServer] = None
+    ) -> bool:
+        """Delete a transcoding job and its files."""
+        server = server or self.get_server()
+        if not server:
+            return False
+        
+        try:
+            response = await self._request_with_retry(
+                "DELETE",
+                f"{server.base_url}/api/transcode/{job_id}"
+            )
+            return response.status_code == 200
+        except Exception as e:
+            logger.error(f"Delete request error: {e}")
+        
+        return False
+    
+    async def subscribe_progress(
+        self,
+        job_ids: List[str],
+        server: Optional[GhostStreamServer] = None
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """
+        Subscribe to real-time progress updates via WebSocket.
+        
+        Yields progress events as they arrive. Much more efficient than polling.
+        
+        Args:
+            job_ids: List of job IDs to subscribe to
+            server: Server to connect to
+        
+        Yields:
+            Dict with progress data: {"type": "progress", "job_id": "...", "data": {...}}
+        
+        Example:
+            async for event in client.subscribe_progress(["job-123"]):
+                if event["type"] == "progress":
+                    print(f"Progress: {event['data']['progress']}%")
+                elif event["type"] == "status_change":
+                    print(f"Status: {event['data']['status']}")
+        
+        Requires: pip install websockets
+        """
+        if not HAS_WEBSOCKETS:
+            logger.error("WebSocket support requires 'websockets' package: pip install websockets")
+            return
+        
+        server = server or self.get_server()
+        if not server:
+            logger.error("No server available for WebSocket connection")
+            return
+        
+        ws_url = f"ws://{server.host}:{server.port}/ws/progress"
+        
+        try:
+            async with websockets.connect(ws_url) as ws:
+                # Subscribe to jobs
+                subscribe_msg = {
+                    "type": "subscribe",
+                    "job_ids": job_ids
+                }
+                await ws.send(json.dumps(subscribe_msg))
+                logger.info(f"[GhostStream] Subscribed to progress for {len(job_ids)} jobs")
+                
+                # Yield events as they arrive
+                async for message in ws:
+                    try:
+                        event = json.loads(message)
+                        yield event
+                        
+                        # Check if all jobs are complete
+                        if event.get("type") == "status_change":
+                            status = event.get("data", {}).get("status")
+                            if status in ["ready", "error", "cancelled"]:
+                                job_id = event.get("job_id")
+                                if job_id in job_ids:
+                                    job_ids.remove(job_id)
+                                if not job_ids:
+                                    logger.info("[GhostStream] All jobs complete, closing WebSocket")
+                                    return
+                    except json.JSONDecodeError:
+                        logger.warning(f"[GhostStream] Invalid WebSocket message: {message[:100]}")
+        except Exception as e:
+            logger.error(f"[GhostStream] WebSocket error: {e}")
     
     async def wait_for_ready(
         self,
         job_id: str,
         timeout: float = 300,
         poll_interval: float = 1.0,
-        server: Optional[GhostStreamServer] = None
+        server: Optional[GhostStreamServer] = None,
+        use_websocket: bool = False
     ) -> Optional[TranscodeJob]:
         """
         Wait for a job to be ready for streaming.
         
         For live transcoding (HLS), the job becomes ready quickly
         as segments are generated.
+        
+        Args:
+            job_id: Job ID to wait for
+            timeout: Maximum time to wait in seconds
+            poll_interval: How often to poll (ignored if use_websocket=True)
+            server: Server to query
+            use_websocket: Use WebSocket for real-time updates (more efficient)
         """
         server = server or self.get_server()
         if not server:
@@ -584,28 +1204,26 @@ class GhostStreamLoadBalancer:
     
     async def refresh_stats(self) -> None:
         """Refresh statistics from all servers."""
-        import time
-        
         for name, server in self.client.servers.items():
             try:
-                async with httpx.AsyncClient() as http:
-                    response = await http.get(
-                        f"{server.base_url}/api/health",
-                        timeout=5.0
-                    )
-                    if response.status_code == 200:
-                        data = response.json()
-                        async with self._stats_lock:
-                            stats = self.server_stats.get(name, ServerStats())
-                            stats.active_jobs = data.get("current_jobs", 0)
-                            stats.queued_jobs = data.get("queued_jobs", 0)
-                            stats.is_healthy = True
-                            stats.last_health_check = time.time()
-                            self.server_stats[name] = stats
-                    else:
-                        async with self._stats_lock:
-                            if name in self.server_stats:
-                                self.server_stats[name].is_healthy = False
+                # Use the client's shared HTTP client for connection pooling
+                response = await self.client._request_with_retry(
+                    "GET",
+                    f"{server.base_url}/api/health"
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    async with self._stats_lock:
+                        stats = self.server_stats.get(name, ServerStats())
+                        stats.active_jobs = data.get("current_jobs", 0)
+                        stats.queued_jobs = data.get("queued_jobs", 0)
+                        stats.is_healthy = True
+                        stats.last_health_check = time.time()
+                        self.server_stats[name] = stats
+                else:
+                    async with self._stats_lock:
+                        if name in self.server_stats:
+                            self.server_stats[name].is_healthy = False
             except Exception as e:
                 logger.warning(f"Failed to get stats from {name}: {e}")
                 async with self._stats_lock:
@@ -614,9 +1232,6 @@ class GhostStreamLoadBalancer:
     
     async def _select_server(self) -> Optional[GhostStreamServer]:
         """Select a server based on the load balancing strategy."""
-        import random
-        import time
-        
         logger.info(f"[LoadBalancer] Selecting server from {len(self.client.servers)} available")
         
         # If no servers, return None
@@ -638,9 +1253,6 @@ class GhostStreamLoadBalancer:
     
     async def _select_server_advanced(self) -> Optional[GhostStreamServer]:
         """Advanced server selection with load balancing (unused for now)."""
-        import random
-        import time
-        
         healthy_servers = [
             (name, self.client.servers[name])
             for name, stats in self.server_stats.items()

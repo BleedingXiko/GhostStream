@@ -14,10 +14,13 @@ Then run these examples:
 """
 
 import time
-import httpx
+from ghoststream import GhostStreamClient, TranscodeStatus
 
 # Change this to your GhostStream server
-GHOSTSTREAM_URL = "http://localhost:8765"
+GHOSTSTREAM_SERVER = "localhost:8765"
+
+# Create a shared client instance
+client = GhostStreamClient(manual_server=GHOSTSTREAM_SERVER)
 
 
 # =============================================================================
@@ -34,45 +37,38 @@ def example_url_to_hls():
     # Any video URL works - HTTP, RTSP, S3, etc.
     video_url = "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/1080/Big_Buck_Bunny_1080_10s_1MB.mp4"
     
-    response = httpx.post(
-        f"{GHOSTSTREAM_URL}/api/transcode/start",
-        json={
-            "source": video_url,
-            "mode": "stream",  # HLS streaming
-            "output": {
-                "resolution": "720p",
-                "video_codec": "h264"
-            }
-        },
-        timeout=30
+    # Start transcoding using SDK
+    job = client.transcode_sync(
+        source=video_url,
+        mode="stream",
+        resolution="720p",
+        video_codec="h264"
     )
     
-    if response.status_code != 200:
-        print(f"❌ Error: {response.text}")
+    if job.status == TranscodeStatus.ERROR:
+        print(f"❌ Error: {job.error_message}")
         return
     
-    job = response.json()
-    job_id = job["job_id"]
-    print(f"✅ Job started: {job_id}")
+    print(f"✅ Job started: {job.job_id}")
     
     # Wait for stream to be ready
     print("   Waiting for transcode...")
-    for _ in range(30):
-        status = httpx.get(f"{GHOSTSTREAM_URL}/api/transcode/{job_id}/status").json()
-        if status["status"] == "ready":
-            print(f"✅ Stream ready!")
-            print(f"   URL: {status['stream_url']}")
-            print(f"\n   Play with VLC: vlc {status['stream_url']}")
-            print(f"   Or in browser with hls.js")
-            break
-        elif status["status"] == "error":
-            print(f"❌ Error: {status.get('error')}")
-            break
-        time.sleep(1)
+    result = client.wait_for_ready_sync(job.job_id, timeout=30)
+    
+    if result and result.status == TranscodeStatus.READY:
+        print(f"✅ Stream ready!")
+        print(f"   URL: {result.stream_url}")
+        print(f"\n   Play with VLC: vlc {result.stream_url}")
+        print(f"   Or in browser with hls.js")
+    elif result and result.status == TranscodeStatus.ERROR:
+        print(f"❌ Error: {result.error_message}")
+    elif result and result.stream_url:
+        print(f"✅ Stream available (still processing)!")
+        print(f"   URL: {result.stream_url}")
     
     # Cleanup
     input("\nPress Enter to cleanup...")
-    httpx.delete(f"{GHOSTSTREAM_URL}/api/transcode/{job_id}")
+    client.delete_job_sync(job.job_id)
     print("✅ Cleaned up")
 
 
@@ -115,43 +111,36 @@ def example_adaptive_bitrate():
     
     video_url = "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/1080/Big_Buck_Bunny_1080_10s_1MB.mp4"
     
-    response = httpx.post(
-        f"{GHOSTSTREAM_URL}/api/transcode/start",
-        json={
-            "source": video_url,
-            "mode": "abr",  # Adaptive bitrate - creates 1080p, 720p, 480p variants
-            "output": {
-                "video_codec": "h264"
-            }
-        },
-        timeout=30
+    # Start ABR transcoding using SDK
+    job = client.transcode_sync(
+        source=video_url,
+        mode="abr",  # Adaptive bitrate - creates 1080p, 720p, 480p variants
+        video_codec="h264"
     )
     
-    if response.status_code != 200:
-        print(f"❌ Error: {response.text}")
+    if job.status == TranscodeStatus.ERROR:
+        print(f"❌ Error: {job.error_message}")
         return
     
-    job = response.json()
-    job_id = job["job_id"]
-    print(f"✅ ABR job started: {job_id}")
+    print(f"✅ ABR job started: {job.job_id}")
     print("   Creating quality variants: 1080p, 720p, 480p...")
     
     # Wait for ready
-    for _ in range(60):
-        status = httpx.get(f"{GHOSTSTREAM_URL}/api/transcode/{job_id}/status").json()
-        if status["status"] == "ready":
-            print(f"✅ ABR stream ready!")
-            print(f"   Master playlist: {status['stream_url']}")
-            print(f"\n   The master.m3u8 contains all quality variants.")
-            print(f"   HLS players (VLC, hls.js) auto-select best quality.")
-            break
-        elif status["status"] == "error":
-            print(f"❌ Error: {status.get('error')}")
-            break
-        time.sleep(1)
+    result = client.wait_for_ready_sync(job.job_id, timeout=60)
+    
+    if result and result.status == TranscodeStatus.READY:
+        print(f"✅ ABR stream ready!")
+        print(f"   Master playlist: {result.stream_url}")
+        print(f"\n   The master.m3u8 contains all quality variants.")
+        print(f"   HLS players (VLC, hls.js) auto-select best quality.")
+    elif result and result.status == TranscodeStatus.ERROR:
+        print(f"❌ Error: {result.error_message}")
+    elif result and result.stream_url:
+        print(f"✅ ABR stream available!")
+        print(f"   Master playlist: {result.stream_url}")
     
     input("\nPress Enter to cleanup...")
-    httpx.delete(f"{GHOSTSTREAM_URL}/api/transcode/{job_id}")
+    client.delete_job_sync(job.job_id)
 
 
 # =============================================================================
@@ -164,12 +153,12 @@ def example_check_hardware():
     print("\n🎬 Example 4: Hardware Capabilities")
     print("-" * 40)
     
-    response = httpx.get(f"{GHOSTSTREAM_URL}/api/capabilities")
-    if response.status_code != 200:
-        print(f"❌ Error: {response.text}")
-        return
+    # Get capabilities using SDK
+    caps = client.get_capabilities_sync()
     
-    caps = response.json()
+    if not caps:
+        print("❌ Error: Could not get capabilities")
+        return
     
     print(f"FFmpeg: {caps.get('ffmpeg_version', 'unknown')}")
     print(f"Platform: {caps.get('platform', 'unknown')}")
@@ -195,19 +184,16 @@ def example_health_check():
     print("\n🎬 Example 5: Health Check")
     print("-" * 40)
     
-    try:
-        response = httpx.get(f"{GHOSTSTREAM_URL}/api/health", timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            print(f"✅ GhostStream is healthy")
-            print(f"   Version: {data.get('version')}")
-            print(f"   Uptime: {data.get('uptime_seconds', 0):.0f}s")
-            print(f"   Active jobs: {data.get('current_jobs', 0)}")
-            print(f"   Queued jobs: {data.get('queued_jobs', 0)}")
-        else:
-            print(f"❌ Unhealthy: {response.status_code}")
-    except httpx.ConnectError:
-        print(f"❌ Cannot connect to {GHOSTSTREAM_URL}")
+    # Check health using SDK
+    if client.health_check_sync():
+        print(f"✅ GhostStream is healthy")
+        # Get more details from capabilities
+        caps = client.get_capabilities_sync()
+        if caps:
+            print(f"   Version: {caps.get('version', 'unknown')}")
+            print(f"   Platform: {caps.get('platform', 'unknown')}")
+    else:
+        print(f"❌ Cannot connect to GhostStream at {GHOSTSTREAM_SERVER}")
         print(f"   Make sure GhostStream is running: python run.py")
 
 
@@ -224,29 +210,23 @@ def example_seeking():
     
     video_url = "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/1080/Big_Buck_Bunny_1080_10s_1MB.mp4"
     
-    response = httpx.post(
-        f"{GHOSTSTREAM_URL}/api/transcode/start",
-        json={
-            "source": video_url,
-            "mode": "stream",
-            "start_time": 5,  # Start from 5 seconds
-            "output": {
-                "resolution": "720p"
-            }
-        },
-        timeout=30
+    # Start transcoding from specific timestamp using SDK
+    job = client.transcode_sync(
+        source=video_url,
+        mode="stream",
+        start_time=5,  # Start from 5 seconds
+        resolution="720p"
     )
     
-    if response.status_code == 200:
-        job = response.json()
-        print(f"✅ Started from 5 seconds: {job['job_id']}")
+    if job.status != TranscodeStatus.ERROR:
+        print(f"✅ Started from 5 seconds: {job.job_id}")
         
         # Cleanup after a moment
         time.sleep(3)
-        httpx.delete(f"{GHOSTSTREAM_URL}/api/transcode/{job['job_id']}")
+        client.delete_job_sync(job.job_id)
         print("✅ Cleaned up")
     else:
-        print(f"❌ Error: {response.text}")
+        print(f"❌ Error: {job.error_message}")
 
 
 # =============================================================================
@@ -256,7 +236,7 @@ if __name__ == "__main__":
     print("=" * 50)
     print("GhostStream Quick Start Examples")
     print("=" * 50)
-    print(f"\nServer: {GHOSTSTREAM_URL}")
+    print(f"\nServer: {GHOSTSTREAM_SERVER}")
     print("\nMake sure GhostStream is running first:")
     print("  python run.py")
     print("\n" + "=" * 50)

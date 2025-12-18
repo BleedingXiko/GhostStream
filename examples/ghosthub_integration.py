@@ -26,14 +26,28 @@ Communication Methods:
     - HTTP REST: API calls (start job, get status, cancel)
     - WebSocket: Real-time push updates (progress, status changes)
     - mDNS/UDP: Server discovery on LAN
+
+SDK Installation:
+    pip install ghoststream
+    # or from source: pip install -e .
 """
 
 import asyncio
 import logging
-import httpx
 import threading
 import json
 from typing import Optional, Dict, Any, Callable, List
+
+# Import GhostStream SDK
+from ghoststream import (
+    GhostStreamClient,
+    GhostStreamServer,
+    GhostStreamLoadBalancer,
+    TranscodeJob,
+    TranscodeStatus,
+    ClientConfig,
+    LoadBalanceStrategy,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -45,227 +59,6 @@ try:
 except ImportError:
     HAS_WEBSOCKETS = False
     logger.info("websockets not installed - using HTTP polling for progress")
-
-
-# ============== Direct HTTP Client (Recommended for GhostHub) ==============
-
-class GhostStreamClient:
-    """
-    Simple HTTP client for GhostStream.
-    
-    This is a synchronous client suitable for Flask/GhostHub integration.
-    For the full async client, see ghoststream.client module.
-    """
-    
-    def __init__(self, server_url: str = "http://192.168.4.2:8765"):
-        self.server_url = server_url.rstrip("/")
-        self.active_jobs: Dict[str, str] = {}  # video_id -> job_id
-    
-    def health_check(self) -> bool:
-        """Check if GhostStream is reachable."""
-        try:
-            with httpx.Client(timeout=5.0) as http:
-                resp = http.get(f"{self.server_url}/api/health")
-                return resp.status_code == 200
-        except:
-            return False
-    
-    def get_capabilities(self) -> Optional[Dict]:
-        """Get server capabilities (codecs, hw acceleration, etc.)."""
-        try:
-            with httpx.Client(timeout=10.0) as http:
-                resp = http.get(f"{self.server_url}/api/capabilities")
-                if resp.status_code == 200:
-                    return resp.json()
-        except Exception as e:
-            logger.error(f"Failed to get capabilities: {e}")
-        return None
-    
-    # ==================== STREAMING MODES ====================
-    
-    def start_stream(
-        self,
-        source: str,
-        resolution: str = "1080p",
-        start_time: float = 0,
-        video_codec: str = "h264",
-        hw_accel: str = "auto"
-    ) -> Optional[Dict]:
-        """
-        Start single-quality HLS streaming (fastest startup).
-        
-        Best for: Quick playback, lower-powered clients, known bandwidth.
-        """
-        return self._transcode(
-            source=source,
-            mode="stream",
-            resolution=resolution,
-            start_time=start_time,
-            video_codec=video_codec,
-            hw_accel=hw_accel
-        )
-    
-    def start_abr_stream(
-        self,
-        source: str,
-        start_time: float = 0,
-        video_codec: str = "h264",
-        hw_accel: str = "auto"
-    ) -> Optional[Dict]:
-        """
-        Start Adaptive Bitrate (ABR) streaming with multiple quality variants.
-        
-        Best for: Variable network conditions, quality selection UI.
-        
-        Automatically generates quality variants based on source:
-        - 4K source -> 4K, 1080p, 720p, 480p variants
-        - 1080p source -> 1080p, 720p, 480p variants
-        - etc. (never upscales)
-        """
-        return self._transcode(
-            source=source,
-            mode="abr",
-            resolution="original",  # ABR handles resolution automatically
-            start_time=start_time,
-            video_codec=video_codec,
-            hw_accel=hw_accel
-        )
-    
-    def start_batch_transcode(
-        self,
-        source: str,
-        output_format: str = "mp4",
-        resolution: str = "1080p",
-        video_codec: str = "h264",
-        two_pass: bool = False
-    ) -> Optional[Dict]:
-        """
-        Start batch (file-to-file) transcoding.
-        
-        Best for: Pre-transcoding library, overnight processing.
-        
-        Args:
-            two_pass: Enable two-pass encoding for better quality (slower)
-        """
-        return self._transcode(
-            source=source,
-            mode="batch",
-            format=output_format,
-            resolution=resolution,
-            video_codec=video_codec,
-            two_pass=two_pass
-        )
-    
-    def _transcode(
-        self,
-        source: str,
-        mode: str = "stream",
-        format: str = "hls",
-        resolution: str = "1080p",
-        video_codec: str = "h264",
-        audio_codec: str = "aac",
-        bitrate: str = "auto",
-        hw_accel: str = "auto",
-        start_time: float = 0,
-        tone_map: bool = True,
-        two_pass: bool = False
-    ) -> Optional[Dict]:
-        """Internal transcode method."""
-        request_body = {
-            "source": source,
-            "mode": mode,
-            "output": {
-                "format": format,
-                "video_codec": video_codec,
-                "audio_codec": audio_codec,
-                "resolution": resolution,
-                "bitrate": bitrate,
-                "hw_accel": hw_accel,
-                "tone_map": tone_map,
-                "two_pass": two_pass
-            },
-            "start_time": start_time
-        }
-        
-        try:
-            with httpx.Client(timeout=30.0) as http:
-                resp = http.post(
-                    f"{self.server_url}/api/transcode/start",
-                    json=request_body
-                )
-                if resp.status_code == 200:
-                    return resp.json()
-                else:
-                    logger.error(f"Transcode error: {resp.text[:200]}")
-        except Exception as e:
-            logger.error(f"Transcode request failed: {e}")
-        return None
-    
-    # ==================== JOB MANAGEMENT ====================
-    
-    def get_job_status(self, job_id: str) -> Optional[Dict]:
-        """Get status of a transcoding job."""
-        try:
-            with httpx.Client(timeout=10.0) as http:
-                resp = http.get(f"{self.server_url}/api/transcode/{job_id}/status")
-                if resp.status_code == 200:
-                    return resp.json()
-        except:
-            pass
-        return None
-    
-    def cancel_job(self, job_id: str) -> bool:
-        """Cancel a running job."""
-        try:
-            with httpx.Client(timeout=10.0) as http:
-                resp = http.post(f"{self.server_url}/api/transcode/{job_id}/cancel")
-                return resp.status_code == 200
-        except:
-            return False
-    
-    def delete_job(self, job_id: str) -> bool:
-        """Delete a job and clean up its temp files."""
-        try:
-            with httpx.Client(timeout=10.0) as http:
-                resp = http.delete(f"{self.server_url}/api/transcode/{job_id}")
-                return resp.status_code == 200
-        except:
-            return False
-    
-    def wait_for_ready(self, job_id: str, timeout: float = 60) -> Optional[Dict]:
-        """Wait for a job to be ready."""
-        import time
-        start = time.time()
-        while time.time() - start < timeout:
-            status = self.get_job_status(job_id)
-            if status and status.get("status") in ("ready", "error", "cancelled"):
-                return status
-            time.sleep(1)
-        return None
-    
-    # ==================== CLEANUP ====================
-    
-    def get_cleanup_stats(self) -> Optional[Dict]:
-        """Get cleanup statistics (active jobs, temp space, etc.)."""
-        try:
-            with httpx.Client(timeout=10.0) as http:
-                resp = http.get(f"{self.server_url}/api/cleanup/stats")
-                if resp.status_code == 200:
-                    return resp.json()
-        except:
-            pass
-        return None
-    
-    def run_cleanup(self) -> Optional[Dict]:
-        """Manually trigger cleanup of stale jobs and orphaned files."""
-        try:
-            with httpx.Client(timeout=30.0) as http:
-                resp = http.post(f"{self.server_url}/api/cleanup/run")
-                if resp.status_code == 200:
-                    return resp.json()
-        except:
-            pass
-        return None
 
 
 # ============== WebSocket Client for Real-Time Updates ==============
@@ -433,40 +226,45 @@ def example_basic_streaming():
     print("Example 1: Basic HLS Streaming")
     print("="*60)
     
-    client = GhostStreamClient("http://192.168.4.2:8765")
+    # Create SDK client with manual server address
+    client = GhostStreamClient(manual_server="192.168.4.2:8765")
     
-    if not client.health_check():
+    if not client.health_check_sync():
         print("❌ GhostStream not reachable")
         return
     
     print("✅ GhostStream is online")
     
-    # Start transcoding
-    job = client.start_stream(
+    # Start transcoding using SDK
+    job = client.transcode_sync(
         source="http://192.168.4.1:5000/media/movie.mkv",
+        mode="stream",
         resolution="1080p"
     )
     
-    if not job:
-        print("❌ Failed to start transcoding")
+    if job.status == TranscodeStatus.ERROR:
+        print(f"❌ Failed to start transcoding: {job.error_message}")
         return
     
-    print(f"✅ Job started: {job['job_id']}")
-    print(f"   HW Accel: {job.get('hw_accel_used', 'pending')}")
+    print(f"✅ Job started: {job.job_id}")
+    print(f"   HW Accel: {job.hw_accel_used or 'pending'}")
     
     # Wait for stream to be ready
-    status = client.wait_for_ready(job["job_id"], timeout=30)
+    result = client.wait_for_ready_sync(job.job_id, timeout=30)
     
-    if status and status.get("status") == "ready":
+    if result and result.status == TranscodeStatus.READY:
         print(f"✅ Stream ready!")
-        print(f"   URL: {status['stream_url']}")
-        print(f"\n   Play with: ffplay '{status['stream_url']}'")
+        print(f"   URL: {result.stream_url}")
+        print(f"\n   Play with: ffplay '{result.stream_url}'")
+    elif result and result.stream_url:
+        print(f"✅ Stream available (processing)!")
+        print(f"   URL: {result.stream_url}")
     else:
-        print(f"❌ Transcoding failed: {status}")
+        print(f"❌ Transcoding failed: {result}")
     
     # Cleanup when done
     input("\nPress Enter to cleanup...")
-    client.delete_job(job["job_id"])
+    client.delete_job_sync(job.job_id)
     print("✅ Cleaned up")
 
 
@@ -481,44 +279,48 @@ def example_abr_streaming():
     print("Example 2: Adaptive Bitrate (ABR) Streaming")
     print("="*60)
     
-    client = GhostStreamClient("http://192.168.4.2:8765")
+    client = GhostStreamClient(manual_server="192.168.4.2:8765")
     
-    if not client.health_check():
+    if not client.health_check_sync():
         print("❌ GhostStream not reachable")
         return
     
-    # Check capabilities
-    caps = client.get_capabilities()
+    # Check capabilities using SDK
+    caps = client.get_capabilities_sync()
     if caps:
         print(f"✅ Server capabilities:")
         print(f"   Video codecs: {caps.get('video_codecs', [])}")
         print(f"   HW acceleration: {caps.get('hw_accels', [])}")
     
     # Start ABR transcoding (multiple quality variants)
-    job = client.start_abr_stream(
-        source="http://192.168.4.1:5000/media/4k-hdr-movie.mkv"
+    job = client.transcode_sync(
+        source="http://192.168.4.1:5000/media/4k-hdr-movie.mkv",
+        mode="abr"
     )
     
-    if not job:
-        print("❌ Failed to start ABR transcoding")
+    if job.status == TranscodeStatus.ERROR:
+        print(f"❌ Failed to start ABR transcoding: {job.error_message}")
         return
     
-    print(f"✅ ABR job started: {job['job_id']}")
+    print(f"✅ ABR job started: {job.job_id}")
     
     # Wait for stream
-    status = client.wait_for_ready(job["job_id"], timeout=60)
+    result = client.wait_for_ready_sync(job.job_id, timeout=60)
     
-    if status and status.get("status") == "ready":
+    if result and result.status == TranscodeStatus.READY:
         print(f"✅ ABR stream ready!")
-        print(f"   Master playlist: {status['stream_url']}")
+        print(f"   Master playlist: {result.stream_url}")
         print(f"\n   The master.m3u8 contains multiple quality variants.")
         print(f"   HLS players automatically select best quality.")
+    elif result and result.stream_url:
+        print(f"✅ ABR stream available!")
+        print(f"   Master playlist: {result.stream_url}")
     else:
-        print(f"❌ ABR transcoding failed: {status}")
+        print(f"❌ ABR transcoding failed: {result}")
     
     # Cleanup
     input("\nPress Enter to cleanup...")
-    client.delete_job(job["job_id"])
+    client.delete_job_sync(job.job_id)
 
 
 def example_hdr_content():
@@ -531,27 +333,31 @@ def example_hdr_content():
     print("Example 3: HDR to SDR Tone Mapping")
     print("="*60)
     
-    client = GhostStreamClient("http://192.168.4.2:8765")
+    client = GhostStreamClient(manual_server="192.168.4.2:8765")
     
     # HDR content (10-bit HEVC with HDR10/Dolby Vision)
     # GhostStream detects this and applies tone mapping automatically
-    job = client.start_stream(
+    job = client.transcode_sync(
         source="http://192.168.4.1:5000/media/hdr-demo.mkv",
+        mode="stream",
         resolution="1080p",
-        video_codec="h264"  # H264 doesn't support HDR, so tone mapping is applied
+        video_codec="h264",  # H264 doesn't support HDR, so tone mapping is applied
+        tone_map=True
     )
     
-    if job:
+    if job.status != TranscodeStatus.ERROR:
         print(f"✅ Job started with automatic HDR detection")
         print(f"   Tone mapping will be applied if source is HDR")
         
-        status = client.wait_for_ready(job["job_id"], timeout=60)
-        if status:
-            print(f"   Result: {status.get('status')}")
-            if status.get("stream_url"):
-                print(f"   Stream: {status['stream_url']}")
+        result = client.wait_for_ready_sync(job.job_id, timeout=60)
+        if result:
+            print(f"   Result: {result.status.value}")
+            if result.stream_url:
+                print(f"   Stream: {result.stream_url}")
         
-        client.delete_job(job["job_id"])
+        client.delete_job_sync(job.job_id)
+    else:
+        print(f"❌ Failed: {job.error_message}")
 
 
 def example_seeking():
@@ -564,21 +370,24 @@ def example_seeking():
     print("Example 4: Seeking (Start from 30 minutes)")
     print("="*60)
     
-    client = GhostStreamClient("http://192.168.4.2:8765")
+    client = GhostStreamClient(manual_server="192.168.4.2:8765")
     
     # Start from 30 minutes (1800 seconds)
-    job = client.start_stream(
+    job = client.transcode_sync(
         source="http://192.168.4.1:5000/media/movie.mkv",
+        mode="stream",
         resolution="720p",
         start_time=1800  # 30 minutes in seconds
     )
     
-    if job:
+    if job.status != TranscodeStatus.ERROR:
         print(f"✅ Started transcoding from 30:00")
-        status = client.wait_for_ready(job["job_id"])
-        if status and status.get("stream_url"):
-            print(f"   Stream: {status['stream_url']}")
-        client.delete_job(job["job_id"])
+        result = client.wait_for_ready_sync(job.job_id)
+        if result and result.stream_url:
+            print(f"   Stream: {result.stream_url}")
+        client.delete_job_sync(job.job_id)
+    else:
+        print(f"❌ Failed: {job.error_message}")
 
 
 def example_batch_transcode():
@@ -591,31 +400,34 @@ def example_batch_transcode():
     print("Example 5: Batch Transcoding")
     print("="*60)
     
-    client = GhostStreamClient("http://192.168.4.2:8765")
+    client = GhostStreamClient(manual_server="192.168.4.2:8765")
     
     # High quality two-pass encoding
-    job = client.start_batch_transcode(
+    job = client.transcode_sync(
         source="http://192.168.4.1:5000/media/raw-video.mkv",
-        output_format="mp4",
+        mode="batch",
+        format="mp4",
         resolution="1080p",
         video_codec="h264",
         two_pass=False  # Set True for best quality (2x slower)
     )
     
-    if job:
-        print(f"✅ Batch job started: {job['job_id']}")
+    if job.status != TranscodeStatus.ERROR:
+        print(f"✅ Batch job started: {job.job_id}")
         print(f"   Polling for completion...")
         
         # Poll for completion (batch jobs take longer)
-        status = client.wait_for_ready(job["job_id"], timeout=3600)
+        result = client.wait_for_ready_sync(job.job_id, timeout=3600)
         
-        if status and status.get("status") == "ready":
+        if result and result.status == TranscodeStatus.READY:
             print(f"✅ Transcoding complete!")
-            print(f"   Download: {status.get('download_url')}")
+            print(f"   Download: {result.download_url}")
         else:
             print(f"❌ Batch transcoding failed")
         
-        client.delete_job(job["job_id"])
+        client.delete_job_sync(job.job_id)
+    else:
+        print(f"❌ Failed: {job.error_message}")
 
 
 def example_cleanup_management():
@@ -623,30 +435,29 @@ def example_cleanup_management():
     Example 6: Cleanup and Resource Management
     
     Monitor and manage temp files.
+    Note: The SDK focuses on job management. For cleanup stats, 
+    use direct API calls or the web dashboard.
     """
     print("\n" + "="*60)
     print("Example 6: Cleanup Management")
     print("="*60)
     
-    client = GhostStreamClient("http://192.168.4.2:8765")
+    client = GhostStreamClient(manual_server="192.168.4.2:8765")
     
-    # Check current cleanup stats
-    stats = client.get_cleanup_stats()
-    if stats:
-        print(f"📊 Cleanup Stats:")
-        print(f"   Total jobs: {stats.get('total_jobs', 0)}")
-        print(f"   Active jobs: {stats.get('active_jobs', 0)}")
-        print(f"   Ready jobs: {stats.get('ready_jobs', 0)}")
-        print(f"   Cleaned jobs: {stats.get('cleaned_jobs', 0)}")
-        print(f"   Nearly stale: {stats.get('nearly_stale', 0)}")
-        print(f"   Temp dir: {stats.get('temp_dir')}")
+    # Check server health
+    if client.health_check_sync():
+        print("✅ Server is healthy")
+        
+        # Get capabilities to show server info
+        caps = client.get_capabilities_sync()
+        if caps:
+            print(f"   Version: {caps.get('version', 'unknown')}")
+            print(f"   Platform: {caps.get('platform', 'unknown')}")
+    else:
+        print("❌ Server not reachable")
     
-    # Manual cleanup (optional - runs automatically every 5 min)
-    print("\n🧹 Running manual cleanup...")
-    result = client.run_cleanup()
-    if result:
-        print(f"   Stale jobs cleaned: {result.get('stale_jobs_cleaned', 0)}")
-        print(f"   Orphaned dirs cleaned: {result.get('orphaned_dirs_cleaned', 0)}")
+    print("\n💡 Tip: Jobs are automatically cleaned up after timeout.")
+    print("   Use client.delete_job_sync(job_id) to clean up immediately.")
 
 
 def example_full_workflow():
@@ -659,17 +470,17 @@ def example_full_workflow():
     print("Example 7: Full GhostHub Workflow")
     print("="*60)
     
-    client = GhostStreamClient("http://192.168.4.2:8765")
+    client = GhostStreamClient(manual_server="192.168.4.2:8765")
     
     # 1. Check if transcoding is available
-    if not client.health_check():
+    if not client.health_check_sync():
         print("GhostStream not available - play original file")
         return
     
     # 2. Get capabilities to show in UI
-    caps = client.get_capabilities()
+    caps = client.get_capabilities_sync()
     has_gpu = any("nvenc" in str(caps.get("hw_accels", [])).lower() 
-                  or "qsv" in str(caps.get("hw_accels", [])).lower())
+                  or "qsv" in str(caps.get("hw_accels", [])).lower()) if caps else False
     print(f"✅ GhostStream available (GPU: {has_gpu})")
     
     # 3. User clicks play on a video that needs transcoding
@@ -679,29 +490,28 @@ def example_full_workflow():
     use_abr = True  # Could be a user setting
     
     if use_abr:
-        job = client.start_abr_stream(source=video_url)
+        job = client.transcode_sync(source=video_url, mode="abr")
     else:
-        job = client.start_stream(source=video_url, resolution="1080p")
+        job = client.transcode_sync(source=video_url, mode="stream", resolution="1080p")
     
-    if not job:
-        print("❌ Transcoding failed - fall back to direct play")
+    if job.status == TranscodeStatus.ERROR:
+        print(f"❌ Transcoding failed - fall back to direct play: {job.error_message}")
         return
     
-    job_id = job["job_id"]
-    print(f"✅ Transcoding started: {job_id}")
+    print(f"✅ Transcoding started: {job.job_id}")
     
     # 5. Wait for stream to be ready (with timeout)
-    status = client.wait_for_ready(job_id, timeout=30)
+    result = client.wait_for_ready_sync(job.job_id, timeout=30)
     
-    if not status or status.get("status") != "ready":
-        print("❌ Transcoding timeout - fall back to direct play")
-        client.cancel_job(job_id)
+    if not result or result.status == TranscodeStatus.ERROR:
+        print("❌ Transcoding timeout/error - fall back to direct play")
+        client.cancel_job_sync(job.job_id)
         return
     
     # 6. Give stream URL to video player
-    stream_url = status["stream_url"]
+    stream_url = result.stream_url
     print(f"✅ Playing: {stream_url}")
-    print(f"   HW Accel: {status.get('hw_accel_used', 'unknown')}")
+    print(f"   HW Accel: {result.hw_accel_used or 'unknown'}")
     
     # 7. Simulate playback (in real app, player fetches HLS segments)
     print("\n   [Simulating playback for 5 seconds...]")
@@ -710,7 +520,7 @@ def example_full_workflow():
     
     # 8. User stops playback -> delete job to free resources
     print("\n   User stopped playback")
-    client.delete_job(job_id)
+    client.delete_job_sync(job.job_id)
     print("✅ Job cleaned up")
 
 
@@ -719,6 +529,7 @@ def example_websocket_progress():
     Example 8: Real-Time WebSocket Progress
     
     Use WebSocket instead of polling for instant progress updates.
+    Note: The SDK client has built-in WebSocket support via subscribe_progress().
     """
     print("\n" + "="*60)
     print("Example 8: Real-Time WebSocket Progress")
@@ -729,14 +540,14 @@ def example_websocket_progress():
         print("   Install with: pip install websockets")
         return
     
-    # HTTP client for API calls
-    http_client = GhostStreamClient("http://192.168.4.2:8765")
+    # SDK client for API calls
+    client = GhostStreamClient(manual_server="192.168.4.2:8765")
     
-    if not http_client.health_check():
+    if not client.health_check_sync():
         print("❌ GhostStream not reachable")
         return
     
-    # WebSocket client for real-time updates
+    # WebSocket client for real-time updates (using the example WSClient above)
     ws_client = GhostStreamWSClient("192.168.4.2:8765")
     
     # Set up callbacks
@@ -759,33 +570,33 @@ def example_websocket_progress():
     
     print("✅ WebSocket connected")
     
-    # Start a job
-    job = http_client.start_stream(
+    # Start a job using SDK
+    job = client.transcode_sync(
         source="http://192.168.4.1:5000/media/video.mkv",
+        mode="stream",
         resolution="720p"
     )
     
-    if not job:
-        print("❌ Failed to start job")
+    if job.status == TranscodeStatus.ERROR:
+        print(f"❌ Failed to start job: {job.error_message}")
         ws_client.disconnect()
         return
     
-    job_id = job["job_id"]
-    print(f"✅ Job started: {job_id}")
+    print(f"✅ Job started: {job.job_id}")
     
     # Subscribe to this job's updates only
-    ws_client.subscribe_job(job_id)
+    ws_client.subscribe_job(job.job_id)
     print("✅ Subscribed to job updates via WebSocket")
     print("\n   Watching progress (Ctrl+C to stop)...")
     
     try:
         # Wait for completion (progress comes via WebSocket callback)
         while True:
-            status = http_client.get_job_status(job_id)
-            if status and status.get("status") in ("ready", "error", "cancelled"):
-                print(f"\n✅ Job finished: {status.get('status')}")
-                if status.get("stream_url"):
-                    print(f"   Stream: {status['stream_url']}")
+            result = client.get_job_status_sync(job.job_id)
+            if result and result.status in (TranscodeStatus.READY, TranscodeStatus.ERROR, TranscodeStatus.CANCELLED):
+                print(f"\n✅ Job finished: {result.status.value}")
+                if result.stream_url:
+                    print(f"   Stream: {result.stream_url}")
                 break
             time.sleep(2)
     except KeyboardInterrupt:
@@ -793,7 +604,7 @@ def example_websocket_progress():
     
     # Cleanup
     ws_client.disconnect()
-    http_client.delete_job(job_id)
+    client.delete_job_sync(job.job_id)
     print("✅ Cleaned up")
 
 
