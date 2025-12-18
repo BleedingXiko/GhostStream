@@ -11,9 +11,16 @@ from typing import List, Tuple, Optional
 from ..models import OutputConfig, OutputFormat, VideoCodec, Resolution
 from ..config import TranscodingConfig, HardwareConfig
 from .models import MediaInfo, QualityPreset
-from .constants import get_bitrate_map, AUDIO_BITRATE_MAP, QUALITY_LADDER
+from .constants import (
+    get_bitrate_map, AUDIO_BITRATE_MAP, QUALITY_LADDER,
+    BUFSIZE_MULTIPLIER_HW, BUFSIZE_MULTIPLIER_SW,
+    LOOKAHEAD_FRAMES_HW, LOOKAHEAD_FRAMES_SW,
+    BFRAMES_HIGH_QUALITY, BFRAMES_STANDARD,
+    NVENC_TUNING, GOP_SECONDS,
+)
 from .filters import FilterBuilder
 from .encoders import EncoderSelector
+from .hls import HLSPlaylistGenerator, HLSCodecBuilder, HLSConfig
 
 logger = logging.getLogger(__name__)
 
@@ -45,10 +52,77 @@ class CommandBuilder:
         else:
             return float(bitrate), 'M'
     
-    def _get_bufsize(self, bitrate: str) -> str:
-        """Calculate bufsize (2x bitrate) preserving the unit."""
+    def _get_bufsize(self, bitrate: str, is_hw_encoder: bool = True) -> str:
+        """
+        Calculate bufsize with proper multiplier for encoder type.
+        
+        Hardware encoders benefit from larger buffers (2x) for quality.
+        Software encoders use 1.5x to balance quality and memory.
+        """
         value, unit = self._parse_bitrate(bitrate)
-        return f"{int(value * 2)}{unit}"
+        multiplier = BUFSIZE_MULTIPLIER_HW if is_hw_encoder else BUFSIZE_MULTIPLIER_SW
+        return f"{int(value * multiplier)}{unit}"
+    
+    def _get_nvenc_quality_args(self, preset: str, variant_height: int) -> List[str]:
+        """
+        Get NVENC quality tuning arguments to reduce artifacts.
+        
+        Uses adaptive quantization, lookahead, and proper B-frame settings.
+        """
+        tuning = NVENC_TUNING.get(preset, NVENC_TUNING["p4"])
+        
+        args = [
+            "-preset", tuning["preset"],
+            "-tune", tuning["tune"],
+            "-rc", tuning["rc"],
+        ]
+        
+        # Multipass for better quality (skip for low-latency preset)
+        if tuning["multipass"] != "disabled":
+            args.extend(["-multipass", tuning["multipass"]])
+        
+        # Adaptive quantization for better quality in complex scenes
+        if tuning["spatial_aq"]:
+            args.extend(["-spatial-aq", "1", "-aq-strength", str(tuning["aq_strength"])])
+        if tuning["temporal_aq"]:
+            args.extend(["-temporal-aq", "1"])
+        
+        # Lookahead for better bitrate distribution
+        args.extend(["-rc-lookahead", str(LOOKAHEAD_FRAMES_HW)])
+        
+        # B-frames for better compression
+        bframes = BFRAMES_HIGH_QUALITY if variant_height >= 1080 else BFRAMES_STANDARD
+        args.extend(["-bf", str(bframes)])
+        
+        # B-frame reference mode
+        if tuning["b_ref_mode"] != "disabled":
+            args.extend(["-b_ref_mode", tuning["b_ref_mode"]])
+        
+        return args
+    
+    def _get_x264_quality_args(self, variant_height: int) -> List[str]:
+        """
+        Get x264 quality tuning arguments to reduce artifacts.
+        
+        Uses proper AQ mode, psy-rd, and lookahead.
+        """
+        args = [
+            "-preset", "medium",
+            "-profile:v", "high",
+            "-tune", "film",
+        ]
+        
+        # Lookahead for better rate control
+        args.extend(["-rc-lookahead", str(LOOKAHEAD_FRAMES_SW)])
+        
+        # B-frames
+        bframes = BFRAMES_HIGH_QUALITY if variant_height >= 1080 else BFRAMES_STANDARD
+        args.extend(["-bf", str(bframes)])
+        
+        # AQ mode 2 (variance) for better quality distribution
+        args.extend(["-aq-mode", "2"])
+        
+        return args
     
     def _get_bandwidth_bps(self, bitrate: str) -> int:
         """Convert bitrate string to bits per second for HLS playlist."""
@@ -374,46 +448,70 @@ class CommandBuilder:
         map_args = []
         stream_maps = []
         
+        # Determine if using hardware encoder
+        is_hw = "nvenc" in video_encoder or "qsv" in video_encoder or "vaapi" in video_encoder
+        
+        # Track audio stream index for var_stream_map
+        audio_stream_idx = 0
+        
         for i, variant in enumerate(variants):
-            # Map video output
+            # Map video output from filter_complex
             map_args.extend(["-map", f"[v{i}]"])
+            
+            # Map audio for this variant (each variant gets its own audio mapping)
+            # This avoids "Same elementary stream found more than once" error
+            map_args.extend(["-map", "0:a:0?"])
             
             # Video encoding for this variant
             map_args.extend([f"-c:v:{i}", video_encoder])
             map_args.extend([f"-b:v:{i}", variant.video_bitrate])
-            map_args.extend([f"-maxrate:v:{i}", variant.video_bitrate])
-            map_args.extend([f"-bufsize:v:{i}", self._get_bufsize(variant.video_bitrate)])
             
-            # Add preset for this variant (don't use CRF with ABR - bitrate mode only)
+            # Netflix-level rate control: maxrate slightly above target for headroom
+            value, unit = self._parse_bitrate(variant.video_bitrate)
+            maxrate = f"{value * 1.1:.1f}{unit}"  # 10% headroom
+            map_args.extend([f"-maxrate:v:{i}", maxrate])
+            map_args.extend([f"-bufsize:v:{i}", self._get_bufsize(variant.video_bitrate, is_hw)])
+            
+            # Quality tuning based on encoder type
             if "nvenc" in video_encoder:
-                map_args.extend([f"-preset:v:{i}", variant.hw_preset])
+                # NVENC quality optimization
+                nvenc_args = self._get_nvenc_quality_args(variant.hw_preset, variant.height)
+                for j in range(0, len(nvenc_args), 2):
+                    if j + 1 < len(nvenc_args):
+                        map_args.extend([f"{nvenc_args[j]}:v:{i}", nvenc_args[j + 1]])
             elif "libx264" in video_encoder:
-                map_args.extend([f"-preset:v:{i}", "medium"])
+                # x264 quality optimization
+                x264_args = self._get_x264_quality_args(variant.height)
+                for j in range(0, len(x264_args), 2):
+                    if j + 1 < len(x264_args):
+                        map_args.extend([f"{x264_args[j]}:v:{i}", x264_args[j + 1]])
             elif "libx265" in video_encoder:
                 map_args.extend([f"-preset:v:{i}", "medium"])
+                map_args.extend([f"-x265-params:v:{i}", "aq-mode=2:rc-lookahead=20"])
             
-            # Keyframe interval
-            gop = int(media_info.fps * 2) if media_info.fps > 0 else 60
+            # GOP/Keyframe alignment for proper ABR switching
+            fps = media_info.fps if media_info.fps > 0 else 30
+            gop = int(fps * GOP_SECONDS)  # Use configured GOP seconds
             map_args.extend([
                 f"-g:v:{i}", str(gop),
                 f"-keyint_min:v:{i}", str(gop),
-                f"-sc_threshold:v:{i}", "0",
-                f"-flags:v:{i}", "+cgop",
+                f"-sc_threshold:v:{i}", "0",  # Disable scene detection for consistent GOPs
+                f"-flags:v:{i}", "+cgop",     # Closed GOP for better seeking
             ])
             
-            stream_maps.append(f"v:{i},a:0")
+            # Audio encoding for this variant
+            map_args.extend([f"-c:a:{i}", audio_encoder])
+            if audio_encoder != "copy":
+                map_args.extend([f"-b:a:{i}", "128k", f"-ac:{i}", "2"])
+            
+            # Build var_stream_map entry: v:i,a:i (video stream i, audio stream i)
+            stream_maps.append(f"v:{i},a:{i}")
         
         # Apply filter complex
         if filter_parts:
             cmd.extend(["-filter_complex", ";".join(filter_parts)])
         
         cmd.extend(map_args)
-        
-        # Single audio stream (shared across variants)
-        cmd.extend(["-map", "0:a:0?"])
-        cmd.extend(["-c:a", audio_encoder])
-        if audio_encoder != "copy":
-            cmd.extend(["-b:a", "128k", "-ac", "2"])
         
         # HLS options
         segment_duration = self.transcoding_config.segment_duration
@@ -440,20 +538,56 @@ class CommandBuilder:
     def generate_master_playlist(
         self,
         output_dir: Path,
-        variants: List[QualityPreset]
+        variants: List[QualityPreset],
+        media_info: Optional[MediaInfo] = None,
+        video_codec: str = "h264"
     ) -> str:
-        """Generate HLS master playlist for ABR variants."""
-        lines = ["#EXTM3U", "#EXT-X-VERSION:3"]
+        """
+        Generate Netflix-quality HLS master playlist.
         
-        for i, variant in enumerate(variants):
+        Includes proper CODECS, BANDWIDTH, AVERAGE-BANDWIDTH,
+        and RESOLUTION attributes for optimal player compatibility.
+        """
+        # Use the HLS module for Netflix-level playlist generation
+        hls_gen = HLSPlaylistGenerator(HLSConfig(
+            segment_duration=self.transcoding_config.segment_duration
+        ))
+        
+        if media_info:
+            hls_variants = hls_gen.build_variants(variants, media_info, video_codec)
+            return hls_gen.generate_master_playlist(output_dir, hls_variants)
+        
+        # Fallback to basic playlist if no media info
+        lines = [
+            "#EXTM3U",
+            "#EXT-X-VERSION:6",
+            "#EXT-X-INDEPENDENT-SEGMENTS",
+        ]
+        
+        # Sort by bandwidth descending
+        sorted_variants = sorted(
+            enumerate(variants),
+            key=lambda x: self._get_bandwidth_bps(x[1].video_bitrate),
+            reverse=True
+        )
+        
+        for orig_idx, variant in sorted_variants:
             bandwidth = self._get_bandwidth_bps(variant.video_bitrate)
+            avg_bandwidth = int(bandwidth / 1.4)  # Average is ~70% of peak
+            
+            # Get proper codec string
+            codecs = HLSCodecBuilder.get_full_codec_string(
+                video_codec, variant.width, variant.height
+            )
             
             lines.append(
                 f"#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},"
+                f"AVERAGE-BANDWIDTH={avg_bandwidth},"
                 f"RESOLUTION={variant.width}x{variant.height},"
+                f'CODECS="{codecs}",'
                 f"NAME=\"{variant.name}\""
             )
-            lines.append(f"stream_{i}.m3u8")
+            lines.append(f"stream_{orig_idx}.m3u8")
         
         master_content = "\n".join(lines)
         master_path = output_dir / "master.m3u8"

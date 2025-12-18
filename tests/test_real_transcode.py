@@ -197,8 +197,8 @@ class TestABRTranscoding:
         media_info = MediaInfo(width=640, height=480, duration=60)
         variants = engine.get_abr_variants(media_info)
         
-        # Should only have 1-2 variants for 480p source
-        assert len(variants) <= 2
+        # Should only have 1-3 variants for 480p source (480p, 360p, 240p available)
+        assert len(variants) <= 3
         # Should not upscale
         for v in variants:
             assert v.height <= 480

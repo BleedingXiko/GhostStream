@@ -36,6 +36,12 @@ from .probe import MediaProbe
 from .commands import CommandBuilder
 from .adaptive import HardwareProfiler, AdaptiveQualitySelector, SystemProfile
 
+# Import modular components
+from .error_classifier import ErrorClassifier, get_error_classifier, FFmpegError, FFMPEG_ERROR_MAP
+from .job_context import JobContext, JobRegistry, JobRegistryEntry
+from .ffmpeg_runner import FFmpegRunner, ProgressParser, StallConfig
+from .hls import HLSPlaylistGenerator, HLSConfig, StreamingRecommendations
+
 # Thread pool for blocking I/O operations (cleanup, etc.)
 # Scale workers based on CPU count
 _io_workers = min(max(os.cpu_count() or 4, 2), 8)
@@ -43,254 +49,20 @@ _executor = ThreadPoolExecutor(max_workers=_io_workers, thread_name_prefix="ghos
 
 logger = logging.getLogger(__name__)
 
-# FFmpeg error classification for proper retry/fallback decisions
-@dataclass
-class FFmpegError:
-    """Represents a classified FFmpeg error."""
-    pattern: str
-    category: str  # 'hardware', 'transient', 'fatal', 'resource'
-    retryable: bool
-    description: str
-
-# Comprehensive FFmpeg error map replacing naive substring matching
-FFMPEG_ERROR_MAP: List[FFmpegError] = [
-    # Hardware errors - trigger fallback to software
-    FFmpegError("no capable devices found", "hardware", False, "No hardware encoder devices"),
-    FFmpegError("cannot open", "hardware", False, "Cannot open hardware device"),
-    FFmpegError("initialization failed", "hardware", False, "Hardware init failed"),
-    FFmpegError("hw_frames_ctx", "hardware", False, "Hardware frame context error"),
-    FFmpegError("hwaccel", "hardware", False, "Hardware acceleration error"),
-    FFmpegError("cuda error", "hardware", False, "CUDA error"),
-    FFmpegError("nvenc", "hardware", False, "NVENC error"),
-    FFmpegError("qsv", "hardware", False, "QuickSync error"),
-    FFmpegError("vaapi", "hardware", False, "VAAPI error"),
-    FFmpegError("videotoolbox", "hardware", False, "VideoToolbox error"),
-    FFmpegError("amf", "hardware", False, "AMF error"),
-    FFmpegError("gpu", "hardware", False, "GPU error"),
-    FFmpegError("device", "hardware", False, "Device error"),
-    FFmpegError("driver", "hardware", False, "Driver error"),
-    # Transient network errors - retry with backoff
-    FFmpegError("connection refused", "transient", True, "Connection refused"),
-    FFmpegError("connection reset", "transient", True, "Connection reset"),
-    FFmpegError("connection timed out", "transient", True, "Connection timeout"),
-    FFmpegError("timeout", "transient", True, "Operation timeout"),
-    FFmpegError("temporarily unavailable", "transient", True, "Resource temporarily unavailable"),
-    FFmpegError("network is unreachable", "transient", True, "Network unreachable"),
-    FFmpegError("no route to host", "transient", True, "No route to host"),
-    FFmpegError("end of file", "transient", True, "Unexpected end of file"),
-    FFmpegError("server returned", "transient", True, "HTTP server error"),
-    FFmpegError("404 not found", "transient", False, "Resource not found"),
-    FFmpegError("403 forbidden", "transient", False, "Access forbidden"),
-    FFmpegError("broken pipe", "transient", True, "Broken pipe"),
-    # Resource errors - may retry after delay
-    FFmpegError("out of memory", "resource", False, "Out of memory"),
-    FFmpegError("cannot allocate", "resource", True, "Memory allocation failed"),
-    FFmpegError("too many open files", "resource", True, "File descriptor limit"),
-    FFmpegError("no space left", "resource", False, "No disk space"),
-    FFmpegError("disk quota", "resource", False, "Disk quota exceeded"),
-    # Fatal errors - do not retry
-    FFmpegError("invalid data", "fatal", False, "Invalid input data"),
-    FFmpegError("invalid argument", "fatal", False, "Invalid argument"),
-    FFmpegError("no such file", "fatal", False, "File not found"),
-    FFmpegError("permission denied", "fatal", False, "Permission denied"),
-    FFmpegError("codec not found", "fatal", False, "Codec not found"),
-    FFmpegError("encoder not found", "fatal", False, "Encoder not found"),
-    FFmpegError("decoder not found", "fatal", False, "Decoder not found"),
-    FFmpegError("filter not found", "fatal", False, "Filter not found"),
-]
-
-
-@dataclass
-class JobContext:
-    """Per-job context for tracking state during transcoding."""
-    job_id: str
-    source: str
-    job_dir: Path
-    hw_fallback_attempted: bool = False
-    start_time: float = field(default_factory=time.time)
-    last_progress_time: float = field(default_factory=time.time)
-    last_file_size: int = 0
-    stderr_lines: List[str] = field(default_factory=list)
-    stdout_bytes: int = 0
-    
-    @property
-    def log_prefix(self) -> str:
-        """Get log prefix for this job (easier debugging in parallel transcodes)."""
-        return f"[Job:{self.job_id[:8]}]"
-
-
-@dataclass
-class JobRegistryEntry:
-    """Entry in the job registry."""
-    job_id: str
-    source: str
-    status: str  # 'queued', 'running', 'completed', 'failed', 'cancelled'
-    start_time: float
-    encoder: Optional[str] = None
-    progress: float = 0.0
-
-
-class JobRegistry:
-    """Optional registry to track active/queued jobs inside the engine."""
-    
-    def __init__(self):
-        self._jobs: Dict[str, JobRegistryEntry] = {}
-        self._lock = asyncio.Lock()
-    
-    async def register(self, job_id: str, source: str) -> None:
-        async with self._lock:
-            self._jobs[job_id] = JobRegistryEntry(
-                job_id=job_id,
-                source=source,
-                status="queued",
-                start_time=time.time()
-            )
-    
-    async def update_status(self, job_id: str, status: str, 
-                           encoder: Optional[str] = None,
-                           progress: float = 0.0) -> None:
-        async with self._lock:
-            if job_id in self._jobs:
-                self._jobs[job_id].status = status
-                if encoder:
-                    self._jobs[job_id].encoder = encoder
-                self._jobs[job_id].progress = progress
-    
-    async def remove(self, job_id: str) -> None:
-        async with self._lock:
-            self._jobs.pop(job_id, None)
-    
-    async def get_active_jobs(self) -> List[JobRegistryEntry]:
-        async with self._lock:
-            return [j for j in self._jobs.values() if j.status in ('queued', 'running')]
-    
-    async def get_job(self, job_id: str) -> Optional[JobRegistryEntry]:
-        async with self._lock:
-            return self._jobs.get(job_id)
-    
-    def get_active_count(self) -> int:
-        """Non-async count for quick checks."""
-        return sum(1 for j in self._jobs.values() if j.status == 'running')
-
-
-class ProgressParser:
-    """
-    Centralized FFmpeg progress parsing with throttling.
-    
-    Moves regex parsing out of the hot stderr loop and provides
-    throttled updates to avoid overwhelming callbacks.
-    """
-    
-    # Pre-compiled regex patterns for efficiency
-    _RE_FRAME = re.compile(r"frame=\s*(\d+)")
-    _RE_FPS = re.compile(r"fps=\s*([\d.]+|N/A)")
-    _RE_BITRATE = re.compile(r"bitrate=\s*([\d.]+\s*[kMG]?bits/s|N/A)")
-    _RE_SIZE = re.compile(r"size=\s*(\d+)\s*(kB|MB|B)?")
-    _RE_TIME_FULL = re.compile(r"time=\s*(\d+):(\d+):(\d+\.?\d*)")
-    _RE_TIME_SHORT = re.compile(r"time=\s*(\d+):(\d+\.?\d*)")
-    _RE_SPEED = re.compile(r"speed=\s*([\d.]+)x")
-    
-    def __init__(self, throttle_interval: float = 0.5):
-        self.throttle_interval = throttle_interval
-        self._last_callback_time = 0.0
-        self._pending_line: Optional[str] = None
-    
-    def should_parse(self, line: str) -> bool:
-        """Check if line contains progress info worth parsing."""
-        return "frame=" in line or "size=" in line
-    
-    def parse(self, line: str, progress: TranscodeProgress, 
-              media_info: MediaInfo) -> bool:
-        """
-        Parse FFmpeg progress line and update progress object.
-        
-        Returns True if parsing found progress data.
-        """
-        found_progress = False
-        
-        # Frame count
-        match = self._RE_FRAME.search(line)
-        if match:
-            try:
-                progress.frame = int(match.group(1))
-                found_progress = True
-            except (ValueError, TypeError):
-                pass
-        
-        # FPS
-        match = self._RE_FPS.search(line)
-        if match and match.group(1) != "N/A":
-            try:
-                progress.fps = float(match.group(1))
-            except (ValueError, TypeError):
-                pass
-        
-        # Bitrate
-        match = self._RE_BITRATE.search(line)
-        if match and match.group(1) != "N/A":
-            progress.bitrate = match.group(1).strip()
-        
-        # Size
-        match = self._RE_SIZE.search(line)
-        if match:
-            try:
-                size_val = int(match.group(1))
-                unit = match.group(2) or "kB"
-                if unit == "MB":
-                    progress.total_size = size_val * 1024 * 1024
-                elif unit == "kB":
-                    progress.total_size = size_val * 1024
-                else:
-                    progress.total_size = size_val
-                found_progress = True
-            except (ValueError, TypeError):
-                pass
-        
-        # Time - full format HH:MM:SS.ms
-        match = self._RE_TIME_FULL.search(line)
-        if match:
-            try:
-                h, m, s = match.groups()
-                progress.time = int(h) * 3600 + int(m) * 60 + float(s)
-                found_progress = True
-            except (ValueError, TypeError):
-                pass
-        else:
-            # Try short format MM:SS.ms
-            match = self._RE_TIME_SHORT.search(line)
-            if match:
-                try:
-                    m, s = match.groups()
-                    progress.time = int(m) * 60 + float(s)
-                    found_progress = True
-                except (ValueError, TypeError):
-                    pass
-        
-        # Speed
-        match = self._RE_SPEED.search(line)
-        if match:
-            try:
-                progress.speed = float(match.group(1))
-            except (ValueError, TypeError):
-                pass
-        
-        # Calculate percentage
-        if media_info.duration > 0 and progress.time > 0:
-            progress.percent = min(99.9, (progress.time / media_info.duration) * 100)
-        
-        return found_progress
-    
-    def should_callback(self) -> bool:
-        """Check if enough time has passed to fire callback (throttling)."""
-        now = time.time()
-        if now - self._last_callback_time >= self.throttle_interval:
-            self._last_callback_time = now
-            return True
-        return False
+# Note: FFmpegError, FFMPEG_ERROR_MAP, JobContext, JobRegistry, JobRegistryEntry,
+# ProgressParser are now imported from modular files for cleaner architecture
 
 
 class TranscodeEngine:
-    """FFmpeg-based transcoding engine with modular architecture."""
+    """
+    FFmpeg-based transcoding engine with modular architecture.
+    
+    Features:
+    - Netflix-level HLS streaming with proper CODECS and BANDWIDTH
+    - Hardware-aware adaptive bitrate with NVENC session management
+    - Quality-optimized encoding with artifact reduction
+    - Modular error classification and retry logic
+    """
     
     def __init__(self):
         self.config = get_config()
@@ -330,6 +102,21 @@ class TranscodeEngine:
         
         # Verbose FFmpeg stdout forwarding for debugging
         self._verbose_ffmpeg = os.environ.get('GHOSTSTREAM_FFMPEG_VERBOSE', '').lower() in ('1', 'true', 'yes')
+        
+        # Modular components
+        self._error_classifier = get_error_classifier()
+        self._ffmpeg_runner = FFmpegRunner(
+            stall_config=StallConfig(
+                base_timeout=max(MIN_STALL_TIMEOUT, self.config.transcoding.stall_timeout),
+                timeout_per_segment=STALL_TIMEOUT_PER_SEGMENT,
+            ),
+            verbose=self._verbose_ffmpeg
+        )
+        
+        # HLS generator for Netflix-quality playlists
+        self._hls_generator = HLSPlaylistGenerator(HLSConfig(
+            segment_duration=self.config.transcoding.segment_duration
+        ))
     
     @property
     def hardware_profile(self) -> SystemProfile:
@@ -483,31 +270,16 @@ class TranscodeEngine:
         return grace
     
     def _classify_error(self, error_msg: str) -> Tuple[Optional[FFmpegError], str]:
-        """
-        Classify FFmpeg error using the comprehensive error map.
-        
-        Returns:
-            Tuple of (matched_error, category). Category is 'unknown' if no match.
-        """
-        error_lower = error_msg.lower()
-        
-        for error in FFMPEG_ERROR_MAP:
-            if error.pattern in error_lower:
-                return error, error.category
-        
-        return None, "unknown"
+        """Classify FFmpeg error using the modular error classifier."""
+        return self._error_classifier.classify(error_msg)
     
     def _is_hardware_error(self, error_msg: str) -> bool:
-        """Check if error is hardware-related using the error map."""
-        error, category = self._classify_error(error_msg)
-        return category == "hardware"
+        """Check if error is hardware-related."""
+        return self._error_classifier.is_hardware_error(error_msg)
     
     def _is_transient_error(self, error_msg: str) -> bool:
-        """Check if error is transient (retryable) using the error map."""
-        error, category = self._classify_error(error_msg)
-        if error:
-            return error.retryable
-        return False
+        """Check if error is transient (retryable)."""
+        return self._error_classifier.is_transient_error(error_msg)
     
     def _resolve_output_extension(self, output_format: OutputFormat) -> str:
         """Resolve file extension for output format."""

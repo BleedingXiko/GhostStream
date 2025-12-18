@@ -21,6 +21,30 @@ from .encoders import EncoderSelector
 from .probe import MediaProbe
 from .commands import CommandBuilder
 from .engine import TranscodeEngine
+from .error_classifier import (
+    FFmpegError,
+    ErrorClassifier,
+    get_error_classifier,
+    FFMPEG_ERROR_MAP,
+)
+from .job_context import (
+    JobContext,
+    JobRegistry,
+    JobRegistryEntry,
+)
+from .ffmpeg_runner import (
+    FFmpegRunner,
+    ProgressParser,
+    StallConfig,
+)
+from .hls import (
+    HLSVariant,
+    HLSConfig,
+    HLSCodecBuilder,
+    HLSPlaylistGenerator,
+    StreamingRecommendations,
+    get_hls_generator,
+)
 from .adaptive import (
     HardwareTier,
     PowerSource,
@@ -78,6 +102,26 @@ __all__ = [
     "MediaProbe",
     "CommandBuilder",
     "TranscodeEngine",
+    # Error Classification
+    "FFmpegError",
+    "ErrorClassifier",
+    "get_error_classifier",
+    "FFMPEG_ERROR_MAP",
+    # Job Management
+    "JobContext",
+    "JobRegistry",
+    "JobRegistryEntry",
+    # FFmpeg Runner
+    "FFmpegRunner",
+    "ProgressParser",
+    "StallConfig",
+    # HLS (Netflix-level)
+    "HLSVariant",
+    "HLSConfig",
+    "HLSCodecBuilder",
+    "HLSPlaylistGenerator",
+    "StreamingRecommendations",
+    "get_hls_generator",
     # Adaptive
     "HardwareTier",
     "PowerSource",
