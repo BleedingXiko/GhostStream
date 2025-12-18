@@ -20,21 +20,32 @@ python -m ghoststream --detect-hw
 python -m ghoststream
 ```
 
-### 2. Connect from GhostHub (Python)
+### 2. Install SDK
+
+```bash
+pip install ghoststream
+```
+
+### 3. Connect from GhostHub (Python)
 
 ```python
-from ghoststream.client import GhostStreamClient
+from ghoststream import GhostStreamClient, TranscodeStatus
 
 # Option A: Auto-discover via mDNS
 client = GhostStreamClient()
 client.start_discovery()
 
-# Option B: Manual connection (if mDNS doesn't work)
+# Option B: Manual connection (recommended)
 client = GhostStreamClient(manual_server="192.168.4.2:8765")
 
-# Check if available
-if client.is_available():
-    print("GhostStream found!")
+# Sync usage (Flask/GhostHub compatible)
+job = client.transcode_sync(source="http://pi:5000/video.mkv", resolution="720p")
+print(f"Stream: {job.stream_url}")
+
+# Async usage
+async with GhostStreamClient(manual_server="192.168.4.2:8765") as client:
+    job = await client.transcode(source="http://pi:5000/video.mkv")
+    print(f"Stream: {job.stream_url}")
 ```
 
 ---
@@ -410,7 +421,39 @@ ws.send(JSON.stringify({
 }
 ```
 
-### Python WebSocket Client Example
+### WebSocket Progress (SDK)
+
+The SDK has built-in WebSocket support:
+
+```python
+import asyncio
+from ghoststream import GhostStreamClient, TranscodeStatus
+
+async def transcode_with_progress():
+    client = GhostStreamClient(manual_server="192.168.4.2:8765")
+    
+    # Start a job
+    job = client.transcode_sync(source="http://pi:5000/video.mkv")
+    
+    # Watch progress via WebSocket
+    async for event in client.subscribe_progress([job.job_id]):
+        if event["type"] == "progress":
+            print(f"Progress: {event['data']['progress']:.1f}%")
+        elif event["type"] == "status_change":
+            status = event["data"]["status"]
+            print(f"Status: {status}")
+            if status in ("ready", "error", "cancelled"):
+                break
+    
+    # Cleanup
+    client.delete_job_sync(job.job_id)
+
+asyncio.run(transcode_with_progress())
+```
+
+### WebSocket (Raw)
+
+For non-SDK usage:
 
 ```python
 import asyncio
@@ -448,50 +491,81 @@ asyncio.run(watch_job("192.168.4.2:8765", "your-job-id"))
 
 ---
 
-## Python Client Library
+## Python SDK
 
-The easiest way to integrate with GhostHub.
+The official SDK for integrating with GhostStream.
 
 ### Installation
 
-```python
-# Copy ghoststream/client.py to your GhostHub project
-# or install the whole package:
-pip install -e /path/to/ghoststream
+```bash
+pip install ghoststream
 ```
 
-### Basic Usage
+### Sync Usage (Flask/GhostHub)
+
+```python
+from ghoststream import GhostStreamClient, TranscodeStatus
+
+# Create client
+client = GhostStreamClient(manual_server="192.168.4.2:8765")
+
+# Check health
+if client.health_check_sync():
+    print("GhostStream is online!")
+
+# Get capabilities
+caps = client.get_capabilities_sync()
+print(f"Available codecs: {caps['video_codecs']}")
+
+# Start transcoding
+job = client.transcode_sync(
+    source="http://192.168.4.1:5000/media/movie.mkv",
+    mode="stream",
+    resolution="1080p"
+)
+
+if job.status == TranscodeStatus.ERROR:
+    print(f"Error: {job.error_message}")
+else:
+    print(f"Stream URL: {job.stream_url}")
+
+# Wait for ready
+result = client.wait_for_ready_sync(job.job_id, timeout=60)
+if result and result.status == TranscodeStatus.READY:
+    print(f"Play: {result.stream_url}")
+
+# Cleanup when done
+client.delete_job_sync(job.job_id)
+```
+
+### Async Usage
 
 ```python
 import asyncio
-from ghoststream.client import GhostStreamClient
+from ghoststream import GhostStreamClient, TranscodeStatus
 
 async def main():
-    # Connect to GhostStream
-    client = GhostStreamClient(manual_server="192.168.4.2:8765")
-    
-    # Check health
-    if await client.health_check():
-        print("GhostStream is online!")
-    
-    # Get capabilities
-    caps = await client.get_capabilities()
-    print(f"Available codecs: {caps['video_codecs']}")
-    
-    # Start transcoding
-    job = await client.transcode(
-        source="http://192.168.4.1:5000/media/movie.mkv",
-        mode="stream",
-        resolution="1080p"
-    )
-    
-    print(f"Stream URL: {job.stream_url}")
-    
-    # Wait for it to be ready
-    job = await client.wait_for_ready(job.job_id)
-    
-    if job.status == "ready":
-        print(f"Play this URL: {job.stream_url}")
+    async with GhostStreamClient(manual_server="192.168.4.2:8765") as client:
+        # Check health
+        if await client.health_check():
+            print("GhostStream is online!")
+        
+        # Start transcoding
+        job = await client.transcode(
+            source="http://192.168.4.1:5000/media/movie.mkv",
+            resolution="1080p"
+        )
+        
+        print(f"Stream URL: {job.stream_url}")
+        
+        # Wait for ready
+        result = await client.wait_for_ready(job.job_id)
+        
+        if result.status == TranscodeStatus.READY:
+            print(f"Play: {result.stream_url}")
+        
+        # Cleanup
+        await client.delete_job(job.job_id)
 
 asyncio.run(main())
 ```
@@ -499,7 +573,7 @@ asyncio.run(main())
 ### Auto-Discovery (mDNS)
 
 ```python
-from ghoststream.client import GhostStreamClient
+from ghoststream import GhostStreamClient
 
 client = GhostStreamClient()
 
@@ -732,7 +806,7 @@ python -m ghoststream
 ### Use the Load Balancer
 
 ```python
-from ghoststream.client import GhostStreamLoadBalancer, LoadBalanceStrategy
+from ghoststream import GhostStreamLoadBalancer, LoadBalanceStrategy
 
 # Auto-discover all servers
 lb = GhostStreamLoadBalancer(strategy=LoadBalanceStrategy.LEAST_BUSY)
@@ -761,7 +835,7 @@ job = await lb.transcode(
 | `RANDOM` | Random selection |
 
 ```python
-from ghoststream.client import LoadBalanceStrategy
+from ghoststream import GhostStreamLoadBalancer, LoadBalanceStrategy
 
 # Prefer GPU servers
 lb = GhostStreamLoadBalancer(strategy=LoadBalanceStrategy.FASTEST)

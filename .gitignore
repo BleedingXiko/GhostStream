@@ -82,11 +82,19 @@ Thumbs.db
 transcode_temp/
 *.log
 *.tmp
-*.ts
 *.m3u8
+
+# HLS segments (but not TypeScript)
+stream/**/*.ts
+transcode_temp/**/*.ts
 
 # Secrets
 *.pem
 *.key
 secrets.yaml
 .pypirc
+
+# Node.js (JS SDK)
+node_modules/
+sdk/js/dist/
+sdk/js/*.tsbuildinfo

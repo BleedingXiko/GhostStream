@@ -1,0 +1,46 @@
+{
+  "name": "ghoststream-sdk",
+  "version": "1.2.0",
+  "description": "JavaScript SDK for GhostStream transcoding service",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "require": "./dist/index.js",
+      "import": "./dist/index.mjs",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs,esm --dts",
+    "dev": "tsup src/index.ts --format cjs,esm --dts --watch",
+    "test": "vitest",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "ghoststream",
+    "transcoding",
+    "video",
+    "hls",
+    "streaming",
+    "ffmpeg",
+    "gpu"
+  ],
+  "author": "GhostStream Contributors",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/BleedingXiko/GhostStream"
+  },
+  "homepage": "https://github.com/BleedingXiko/GhostStream#readme",
+  "devDependencies": {
+    "tsup": "^8.0.0",
+    "typescript": "^5.3.0",
+    "vitest": "^1.0.0"
+  }
+}
