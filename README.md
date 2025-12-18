@@ -42,9 +42,15 @@ docker run -d -p 8765:8765 --gpus all ghcr.io/bleedingxiko/ghoststream:nvidia
 
 ## SDK Installation
 
+**Python:**
 ```bash
 pip install ghoststream              # SDK only (lightweight)
 pip install ghoststream[server]      # Full server with all dependencies
+```
+
+**JavaScript/TypeScript:**
+```bash
+npm install ghoststream-sdk
 ```
 
 ## Usage
@@ -63,6 +69,15 @@ print(f"Stream URL: {job.stream_url}")
 async with GhostStreamClient(manual_server="localhost:8765") as client:
     job = await client.transcode(source="https://example.com/video.mp4")
     print(f"Stream URL: {job.stream_url}")
+```
+
+**JavaScript/TypeScript:**
+```typescript
+import { GhostStreamClient } from 'ghoststream-sdk';
+
+const client = new GhostStreamClient('localhost:8765');
+const job = await client.transcode({ source: 'https://example.com/video.mp4', resolution: '720p' });
+console.log(`Stream URL: ${job.streamUrl}`);
 ```
 
 **curl:**
