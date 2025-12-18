@@ -30,16 +30,6 @@ python run.py
 
 The launcher creates a virtual environment, installs dependencies, and starts the server.
 
-### Docker
-
-```bash
-# CPU-only
-docker run -d -p 8765:8765 ghcr.io/bleedingxiko/ghoststream
-
-# NVIDIA GPU
-docker run -d -p 8765:8765 --gpus all ghcr.io/bleedingxiko/ghoststream:nvidia
-```
-
 ## SDK Installation
 
 **Python:**
