@@ -1,0 +1,29 @@
+[package]
+name = "ghoststream-desktop"
+version = "1.0.0"
+description = "GhostStream Desktop - Cross-platform GUI for GhostStream transcoding server"
+authors = ["GhostStream"]
+license = "MIT"
+repository = ""
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "1.5", features = [] }
+
+[dependencies]
+tauri = { version = "1.6", features = ["shell-open", "system-tray"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["process", "sync"] }
+reqwest = { version = "0.11", features = ["json", "blocking"] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
