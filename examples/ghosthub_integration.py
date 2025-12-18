@@ -34,9 +34,7 @@ SDK Installation:
 
 import asyncio
 import logging
-import threading
-import json
-from typing import Optional, Dict, Any, Callable, List
+from typing import Optional, Dict, Any, List
 
 # Import GhostStream SDK
 from ghoststream import (
@@ -52,166 +50,8 @@ from ghoststream import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Optional WebSocket support
-try:
-    import websockets
-    HAS_WEBSOCKETS = True
-except ImportError:
-    HAS_WEBSOCKETS = False
-    logger.info("websockets not installed - using HTTP polling for progress")
-
-
-# ============== WebSocket Client for Real-Time Updates ==============
-
-class GhostStreamWSClient:
-    """
-    WebSocket client for real-time GhostStream progress updates.
-    
-    Benefits over HTTP polling:
-    - Instant updates (no polling delay)
-    - Lower server load
-    - Job subscription filtering (only get updates you need)
-    - Automatic reconnection
-    
-    Usage:
-        ws_client = GhostStreamWSClient("192.168.4.2:8765")
-        ws_client.on_progress = lambda job_id, data: print(f"{job_id}: {data['progress']}%")
-        ws_client.connect()
-        ws_client.subscribe_job("your-job-id")
-    """
-    
-    def __init__(self, server_url: str):
-        self.server_url = server_url
-        self.ws_url = f"ws://{server_url}/ws/progress"
-        self._ws = None
-        self._loop = None
-        self._thread = None
-        self._running = False
-        self._subscribed_jobs: set = set()
-        
-        # Callbacks
-        self.on_progress: Optional[Callable[[str, Dict], None]] = None
-        self.on_status_change: Optional[Callable[[str, str], None]] = None
-        self.on_connect: Optional[Callable[[], None]] = None
-        self.on_disconnect: Optional[Callable[[], None]] = None
-    
-    def connect(self) -> bool:
-        """Connect to GhostStream WebSocket (runs in background thread)."""
-        if not HAS_WEBSOCKETS:
-            logger.warning("websockets package not installed")
-            return False
-        
-        if self._running:
-            return True
-        
-        self._running = True
-        self._thread = threading.Thread(target=self._run_loop, daemon=True)
-        self._thread.start()
-        logger.info(f"WebSocket connecting to {self.ws_url}")
-        return True
-    
-    def disconnect(self):
-        """Disconnect from WebSocket."""
-        self._running = False
-        if self._thread:
-            self._thread.join(timeout=2.0)
-        self._thread = None
-        logger.info("WebSocket disconnected")
-    
-    def subscribe_job(self, job_id: str):
-        """Subscribe to updates for a specific job."""
-        self._subscribed_jobs.add(job_id)
-        if self._loop and self._ws:
-            asyncio.run_coroutine_threadsafe(
-                self._send({"type": "subscribe", "job_ids": [job_id]}),
-                self._loop
-            )
-    
-    def unsubscribe_job(self, job_id: str):
-        """Unsubscribe from a job's updates."""
-        self._subscribed_jobs.discard(job_id)
-        if self._loop and self._ws:
-            asyncio.run_coroutine_threadsafe(
-                self._send({"type": "unsubscribe", "job_ids": [job_id]}),
-                self._loop
-            )
-    
-    def _run_loop(self):
-        """Background thread event loop."""
-        self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
-        self._loop.run_until_complete(self._connection_loop())
-        self._loop.close()
-    
-    async def _connection_loop(self):
-        """Main connection loop with auto-reconnect."""
-        reconnect_delay = 1.0
-        
-        while self._running:
-            try:
-                async with websockets.connect(self.ws_url, ping_interval=None) as ws:
-                    self._ws = ws
-                    reconnect_delay = 1.0
-                    logger.info("WebSocket connected")
-                    
-                    if self.on_connect:
-                        self.on_connect()
-                    
-                    # Re-subscribe to tracked jobs
-                    if self._subscribed_jobs:
-                        await self._send({"type": "subscribe", "job_ids": list(self._subscribed_jobs)})
-                    
-                    # Message loop
-                    async for message in ws:
-                        if not self._running:
-                            break
-                        await self._handle_message(message)
-                        
-            except Exception as e:
-                logger.warning(f"WebSocket error: {e}")
-                self._ws = None
-                
-                if self.on_disconnect:
-                    self.on_disconnect()
-            
-            # Reconnect with backoff
-            if self._running:
-                await asyncio.sleep(reconnect_delay)
-                reconnect_delay = min(reconnect_delay * 2, 30.0)
-    
-    async def _handle_message(self, message: str):
-        """Handle incoming WebSocket message."""
-        try:
-            data = json.loads(message)
-            msg_type = data.get("type", "")
-            
-            if msg_type == "ping":
-                await self._send({"type": "pong"})
-                
-            elif msg_type == "progress":
-                job_id = data.get("job_id")
-                if self.on_progress:
-                    self.on_progress(job_id, data.get("data", {}))
-                    
-            elif msg_type == "status_change":
-                job_id = data.get("job_id")
-                status = data.get("data", {}).get("status")
-                if self.on_status_change:
-                    self.on_status_change(job_id, status)
-                # Auto-unsubscribe from finished jobs
-                if status in ("ready", "error", "cancelled"):
-                    self._subscribed_jobs.discard(job_id)
-                    
-        except json.JSONDecodeError:
-            pass
-    
-    async def _send(self, data: dict):
-        """Send message to WebSocket."""
-        if self._ws:
-            try:
-                await self._ws.send(json.dumps(data))
-            except:
-                pass
+# Note: The SDK includes built-in WebSocket support via client.subscribe_progress()
+# websockets is now a required SDK dependency
 
 
 # ============== Example Usage ==============
@@ -528,84 +368,57 @@ def example_websocket_progress():
     """
     Example 8: Real-Time WebSocket Progress
     
-    Use WebSocket instead of polling for instant progress updates.
-    Note: The SDK client has built-in WebSocket support via subscribe_progress().
+    Use SDK's built-in WebSocket support for instant progress updates.
     """
     print("\n" + "="*60)
-    print("Example 8: Real-Time WebSocket Progress")
+    print("Example 8: Real-Time WebSocket Progress (Async)")
     print("="*60)
     
-    if not HAS_WEBSOCKETS:
-        print("❌ websockets package not installed")
-        print("   Install with: pip install websockets")
-        return
+    async def run_websocket_demo():
+        client = GhostStreamClient(manual_server="192.168.4.2:8765")
+        
+        if not client.health_check_sync():
+            print("❌ GhostStream not reachable")
+            return
+        
+        # Start a job
+        job = client.transcode_sync(
+            source="http://192.168.4.1:5000/media/video.mkv",
+            mode="stream",
+            resolution="720p"
+        )
+        
+        if job.status == TranscodeStatus.ERROR:
+            print(f"❌ Failed to start job: {job.error_message}")
+            return
+        
+        print(f"✅ Job started: {job.job_id}")
+        print("   Watching progress via WebSocket...")
+        
+        try:
+            # Use SDK's built-in WebSocket subscription
+            async for event in client.subscribe_progress([job.job_id]):
+                if event["type"] == "progress":
+                    data = event.get("data", {})
+                    progress = data.get('progress', 0)
+                    fps = data.get('fps', 0)
+                    speed = data.get('speed', 0)
+                    print(f"   📊 {progress:.1f}% | {fps:.0f} fps | {speed:.1f}x speed")
+                    
+                elif event["type"] == "status_change":
+                    status = event.get("data", {}).get("status")
+                    print(f"   📌 Status: {status}")
+                    if status in ("ready", "error", "cancelled"):
+                        break
+        except KeyboardInterrupt:
+            print("\n   Interrupted")
+        
+        # Cleanup
+        client.delete_job_sync(job.job_id)
+        print("✅ Cleaned up")
     
-    # SDK client for API calls
-    client = GhostStreamClient(manual_server="192.168.4.2:8765")
-    
-    if not client.health_check_sync():
-        print("❌ GhostStream not reachable")
-        return
-    
-    # WebSocket client for real-time updates (using the example WSClient above)
-    ws_client = GhostStreamWSClient("192.168.4.2:8765")
-    
-    # Set up callbacks
-    def on_progress(job_id: str, data: Dict):
-        progress = data.get('progress', 0)
-        fps = data.get('fps', 0)
-        speed = data.get('speed', 0)
-        print(f"   📊 {progress:.1f}% | {fps:.0f} fps | {speed:.1f}x speed")
-    
-    def on_status(job_id: str, status: str):
-        print(f"   📌 Status changed: {status}")
-    
-    ws_client.on_progress = on_progress
-    ws_client.on_status_change = on_status
-    
-    # Connect WebSocket
-    ws_client.connect()
-    import time
-    time.sleep(1)  # Wait for connection
-    
-    print("✅ WebSocket connected")
-    
-    # Start a job using SDK
-    job = client.transcode_sync(
-        source="http://192.168.4.1:5000/media/video.mkv",
-        mode="stream",
-        resolution="720p"
-    )
-    
-    if job.status == TranscodeStatus.ERROR:
-        print(f"❌ Failed to start job: {job.error_message}")
-        ws_client.disconnect()
-        return
-    
-    print(f"✅ Job started: {job.job_id}")
-    
-    # Subscribe to this job's updates only
-    ws_client.subscribe_job(job.job_id)
-    print("✅ Subscribed to job updates via WebSocket")
-    print("\n   Watching progress (Ctrl+C to stop)...")
-    
-    try:
-        # Wait for completion (progress comes via WebSocket callback)
-        while True:
-            result = client.get_job_status_sync(job.job_id)
-            if result and result.status in (TranscodeStatus.READY, TranscodeStatus.ERROR, TranscodeStatus.CANCELLED):
-                print(f"\n✅ Job finished: {result.status.value}")
-                if result.stream_url:
-                    print(f"   Stream: {result.stream_url}")
-                break
-            time.sleep(2)
-    except KeyboardInterrupt:
-        print("\n   Interrupted")
-    
-    # Cleanup
-    ws_client.disconnect()
-    client.delete_job_sync(job.job_id)
-    print("✅ Cleaned up")
+    # Run the async demo
+    asyncio.run(run_websocket_demo())
 
 
 if __name__ == "__main__":

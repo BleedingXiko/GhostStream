@@ -33,9 +33,10 @@ with open("README.md", "r", encoding="utf-8") as f:
 sdk_requirements = [
     "httpx>=0.27.0",
     "zeroconf>=0.131.0",
+    "websockets>=12.0",  # For real-time progress updates
 ]
 
-# Full server dependencies
+# Full server dependencies (in addition to SDK)
 server_requirements = [
     # Core Framework
     "fastapi>=0.109.0",
@@ -48,8 +49,6 @@ server_requirements = [
     # Async
     "aiofiles>=23.2.1",
     "asyncio-throttle>=1.0.2",
-    # WebSocket
-    "websockets>=12.0",
     # Logging
     "python-json-logger>=2.0.7",
     # Utilities
@@ -89,13 +88,10 @@ setup(
         "server": server_requirements,
         # All dependencies (SDK + server)
         "all": all_requirements,
-        # WebSocket support for real-time progress
-        "websockets": ["websockets>=12.0"],
         # Development dependencies
         "dev": [
             "pytest>=7.4.0",
             "pytest-asyncio>=0.23.0",
-            "httpx>=0.25.0",
         ],
     },
     entry_points={
