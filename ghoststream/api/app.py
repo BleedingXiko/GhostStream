@@ -65,12 +65,10 @@ async def lifespan(app: FastAPI):
     # Start job manager
     await job_manager.start()
     
-    # Start mDNS service
+    # Start mDNS service in background (don't block startup)
     mdns_service = GhostStreamService(config.server.host, config.server.port)
-    mdns_service.start()
-    
-    # Start UDP broadcast responder as fallback discovery
-    mdns_service.start_udp_responder()
+    asyncio.get_event_loop().run_in_executor(None, mdns_service.start)
+    asyncio.get_event_loop().run_in_executor(None, mdns_service.start_udp_responder)
     
     # Start GhostHub registration if configured
     if config.ghosthub.url and config.ghosthub.auto_register:
