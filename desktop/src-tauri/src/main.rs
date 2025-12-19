@@ -6,12 +6,28 @@
 use std::net::UdpSocket;
 use std::process::{Child, Command};
 use std::sync::Mutex;
-use tauri::{
-    CustomMenuItem, Manager, SystemTray, SystemTrayEvent, SystemTrayMenu, SystemTrayMenuItem,
-};
+use tauri::Manager;
 
 struct GhostStreamState {
     process: Mutex<Option<Child>>,
+}
+
+impl Drop for GhostStreamState {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.process.lock() {
+            if let Some(mut child) = guard.take() {
+                #[cfg(unix)]
+                {
+                    unsafe {
+                        libc::kill(child.id() as i32, libc::SIGTERM);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -34,21 +50,39 @@ fn start_ghoststream(state: tauri::State<GhostStreamState>) -> Result<(), String
 
     // Determine the command based on OS
     #[cfg(target_os = "windows")]
-    let child = Command::new("python")
-        .args(["-m", "ghoststream"])
-        .spawn()
-        .map_err(|e| format!("Failed to start GhostStream: {}", e))?;
+    let child = {
+        use std::os::windows::process::CommandExt;
+        use std::process::Stdio;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        Command::new("python")
+            .args(["-m", "ghoststream"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .stdin(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("Failed to start GhostStream: {}", e))?
+    };
 
     #[cfg(not(target_os = "windows"))]
-    let child = Command::new("python3")
-        .args(["-m", "ghoststream"])
-        .spawn()
-        .or_else(|_| {
-            Command::new("python")
-                .args(["-m", "ghoststream"])
-                .spawn()
-        })
-        .map_err(|e| format!("Failed to start GhostStream: {}", e))?;
+    let child = {
+        use std::process::Stdio;
+        Command::new("python3")
+            .args(["-m", "ghoststream"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .stdin(Stdio::null())
+            .spawn()
+            .or_else(|_| {
+                Command::new("python")
+                    .args(["-m", "ghoststream"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .stdin(Stdio::null())
+                    .spawn()
+            })
+            .map_err(|e| format!("Failed to start GhostStream: {}", e))?
+    };
 
     println!("GhostStream process started with PID: {}", child.id());
 
@@ -186,66 +220,30 @@ fn wait_for_server_ready() -> Result<String, String> {
     Err("Server failed to start within 20 seconds".to_string())
 }
 
-fn create_tray_menu() -> SystemTrayMenu {
-    let show = CustomMenuItem::new("show".to_string(), "Show Window");
-    let start = CustomMenuItem::new("start".to_string(), "Start Server");
-    let stop = CustomMenuItem::new("stop".to_string(), "Stop Server");
-    let quit = CustomMenuItem::new("quit".to_string(), "Quit");
-
-    SystemTrayMenu::new()
-        .add_item(show)
-        .add_native_item(SystemTrayMenuItem::Separator)
-        .add_item(start)
-        .add_item(stop)
-        .add_native_item(SystemTrayMenuItem::Separator)
-        .add_item(quit)
-}
-
 fn main() {
-    let tray = SystemTray::new().with_menu(create_tray_menu());
-
     tauri::Builder::default()
         .manage(GhostStreamState {
             process: Mutex::new(None),
         })
-        .system_tray(tray)
-        .on_system_tray_event(|app, event| match event {
-            SystemTrayEvent::LeftClick { .. } => {
-                if let Some(window) = app.get_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
-            }
-            SystemTrayEvent::MenuItemClick { id, .. } => {
-                let state = app.state::<GhostStreamState>();
-                match id.as_str() {
-                    "show" => {
-                        if let Some(window) = app.get_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
-                    }
-                    "start" => {
-                        let _ = start_ghoststream(state);
-                    }
-                    "stop" => {
-                        let _ = stop_ghoststream(state);
-                    }
-                    "quit" => {
-                        // Stop GhostStream before quitting
-                        let _ = stop_ghoststream(state);
-                        std::process::exit(0);
-                    }
-                    _ => {}
-                }
-            }
-            _ => {}
-        })
         .on_window_event(|event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event.event() {
-                // Hide window instead of closing (minimize to tray)
-                event.window().hide().unwrap();
-                api.prevent_close();
+            if let tauri::WindowEvent::CloseRequested { .. } = event.event() {
+                // Stop the server and exit when window is closed
+                let app = event.window().app_handle();
+                let state = app.state::<GhostStreamState>();
+                if let Ok(mut guard) = state.process.lock() {
+                    if let Some(mut child) = guard.take() {
+                        #[cfg(unix)]
+                        {
+                            unsafe {
+                                libc::kill(child.id() as i32, libc::SIGTERM);
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(200));
+                        }
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                }
+                std::process::exit(0);
             }
         })
         .invoke_handler(tauri::generate_handler![
