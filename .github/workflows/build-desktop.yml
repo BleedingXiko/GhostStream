@@ -48,6 +48,25 @@ jobs:
         working-directory: desktop
         run: npm ci
 
+      - name: Generate macOS icon (.icns)
+        if: matrix.platform == 'macos-latest'
+        working-directory: desktop/src-tauri/icons
+        run: |
+          # Generate .icns from the 1024px PNG using iconutil
+          mkdir -p Ghosthub.iconset
+          sips -z 16 16     Ghosthub1024.png --out Ghosthub.iconset/icon_16x16.png
+          sips -z 32 32     Ghosthub1024.png --out Ghosthub.iconset/icon_16x16@2x.png
+          sips -z 32 32     Ghosthub1024.png --out Ghosthub.iconset/icon_32x32.png
+          sips -z 64 64     Ghosthub1024.png --out Ghosthub.iconset/icon_32x32@2x.png
+          sips -z 128 128   Ghosthub1024.png --out Ghosthub.iconset/icon_128x128.png
+          sips -z 256 256   Ghosthub1024.png --out Ghosthub.iconset/icon_128x128@2x.png
+          sips -z 256 256   Ghosthub1024.png --out Ghosthub.iconset/icon_256x256.png
+          sips -z 512 512   Ghosthub1024.png --out Ghosthub.iconset/icon_256x256@2x.png
+          sips -z 512 512   Ghosthub1024.png --out Ghosthub.iconset/icon_512x512.png
+          cp Ghosthub1024.png Ghosthub.iconset/icon_512x512@2x.png
+          iconutil -c icns Ghosthub.iconset -o Ghosthub.icns
+          rm -rf Ghosthub.iconset
+
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
