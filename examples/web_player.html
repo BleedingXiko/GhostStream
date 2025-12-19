@@ -1,4 +1,19 @@
 <!DOCTYPE html>
+<!--
+    GhostStream Web Player Example
+    
+    HOW TO USE:
+    1. Start GhostStream: python run.py
+    2. Serve this file via HTTP (don't open directly from filesystem):
+       
+       cd examples
+       python -m http.server 8080
+       
+    3. Open http://localhost:8080/web_player.html in your browser
+    
+    NOTE: Opening this file directly (file://) won't work due to browser
+    security restrictions (CORS). You must serve it over HTTP.
+-->
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -226,18 +241,24 @@
         function playStream(streamUrl) {
             document.getElementById('progressCard').classList.add('hidden');
             document.getElementById('playerCard').classList.remove('hidden');
-            document.getElementById('streamInfo').textContent = `🎬 Playing: ${streamUrl}`;
+            
+            // Rewrite stream URL to use configured server (avoids CORS when server returns LAN IP)
+            const serverBase = getServer();
+            const urlPath = new URL(streamUrl).pathname;
+            const localStreamUrl = serverBase + urlPath;
+            
+            document.getElementById('streamInfo').textContent = `🎬 Playing: ${localStreamUrl}`;
 
             const video = document.getElementById('videoPlayer');
 
             if (Hls.isSupported()) {
                 hls = new Hls();
-                hls.loadSource(streamUrl);
+                hls.loadSource(localStreamUrl);
                 hls.attachMedia(video);
                 hls.on(Hls.Events.MANIFEST_PARSED, () => video.play());
             } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
                 // Safari native HLS
-                video.src = streamUrl;
+                video.src = localStreamUrl;
                 video.play();
             } else {
                 document.getElementById('streamInfo').textContent = '❌ HLS not supported in this browser';

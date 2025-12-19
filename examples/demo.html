@@ -1,4 +1,19 @@
 <!DOCTYPE html>
+<!--
+    GhostStream Demo - One Click
+    
+    HOW TO USE:
+    1. Start GhostStream: python run.py
+    2. Serve this file via HTTP (don't open directly from filesystem):
+       
+       cd examples
+       python -m http.server 8080
+       
+    3. Open http://localhost:8080/demo.html in your browser
+    
+    NOTE: Opening this file directly (file://) won't work due to browser
+    security restrictions (CORS). You must serve it over HTTP.
+-->
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -448,7 +463,13 @@
         
         function playStream(streamUrl) {
             showState('player');
-            document.getElementById('streamUrl').textContent = streamUrl;
+            
+            // server returns its LAN IP but we're connecting via localhost)
+            const serverBase = getServer();
+            const urlPath = new URL(streamUrl).pathname;
+            const localStreamUrl = serverBase + urlPath;
+            
+            document.getElementById('streamUrl').textContent = localStreamUrl;
             
             const video = document.getElementById('video');
             
@@ -457,7 +478,7 @@
                     enableWorker: true,
                     lowLatencyMode: true
                 });
-                hls.loadSource(streamUrl);
+                hls.loadSource(localStreamUrl);
                 hls.attachMedia(video);
                 hls.on(Hls.Events.MANIFEST_PARSED, () => {
                     video.play().catch(() => {});
@@ -469,7 +490,7 @@
                 });
             } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
                 // Safari native HLS
-                video.src = streamUrl;
+                video.src = localStreamUrl;
                 video.play().catch(() => {});
             } else {
                 document.getElementById('streamUrl').textContent = 

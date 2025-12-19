@@ -152,6 +152,23 @@ See the `examples/` directory for additional usage examples.
 | [`curl_examples.md`](examples/curl_examples.md) | HTTP/curl commands |
 | [`web_player.html`](examples/web_player.html) | Full-featured web player |
 
+### Running HTML Examples
+
+The HTML examples must be served over HTTP due to browser CORS restrictions:
+
+```bash
+# 1. Start GhostStream
+python run.py
+
+# 2. In another terminal, serve the examples
+cd examples
+python -m http.server 8080
+
+# 3. Open in browser
+#    http://localhost:8080/demo.html
+#    http://localhost:8080/web_player.html
+```
+
 ## Configuration
 
 Create `ghoststream.yaml` to customize (optional):
