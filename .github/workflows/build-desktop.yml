@@ -78,6 +78,10 @@ jobs:
         working-directory: desktop
         run: npm ci
 
+      - name: Download FFmpeg binaries
+        working-directory: desktop
+        run: node download-ffmpeg.js
+
       - name: Generate macOS icons
         if: matrix.platform == 'macos-latest'
         working-directory: desktop/src-tauri/icons

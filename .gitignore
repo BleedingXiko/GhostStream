@@ -98,3 +98,9 @@ secrets.yaml
 node_modules/
 sdk/js/dist/
 sdk/js/*.tsbuildinfo
+
+# Desktop app
+desktop/dist/
+desktop/src-tauri/target/
+desktop/src-tauri/ffmpeg-bin/
+desktop/.ffmpeg-temp/
