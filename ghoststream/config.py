@@ -28,7 +28,7 @@ class GhostHubConfig(BaseModel):
 
 class TranscodingConfig(BaseModel):
     """Transcoding configuration options."""
-    ffmpeg_path: str = "auto"
+    ffmpeg_path: str = Field(default_factory=lambda: os.getenv("GHOSTSTREAM_FFMPEG_PATH", "auto"))
     temp_directory: str = "./transcode_temp"
     max_concurrent_jobs: int = 2
     segment_duration: int = 4  # HLS segment duration in seconds

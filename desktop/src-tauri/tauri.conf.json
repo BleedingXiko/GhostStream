@@ -32,7 +32,8 @@
         "icons/Ghosthub.ico"
       ],
       "resources": [
-        "ffmpeg-bin"
+        "ffmpeg-bin/ffmpeg*",
+        "ffmpeg-bin/ffprobe*"
       ],
       "windows": {
         "certificateThumbprint": null,

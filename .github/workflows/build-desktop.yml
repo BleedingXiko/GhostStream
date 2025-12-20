@@ -42,7 +42,7 @@ jobs:
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.0-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf imagemagick
+          sudo apt-get install -y libwebkit2gtk-4.0-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf imagemagick ffmpeg
 
       - name: Generate Linux icons
         if: matrix.platform == 'ubuntu-22.04'
@@ -78,9 +78,17 @@ jobs:
         working-directory: desktop
         run: npm ci
 
-      - name: Download FFmpeg binaries
+      - name: Download FFmpeg binaries (Windows/macOS only)
+        if: matrix.platform != 'ubuntu-22.04'
         working-directory: desktop
         run: node download-ffmpeg.js
+
+      - name: Skip FFmpeg download for Linux (system package used)
+        if: matrix.platform == 'ubuntu-22.04'
+        working-directory: desktop/src-tauri
+        run: |
+          mkdir -p ffmpeg-bin
+          echo "Linux uses system ffmpeg from apt" > ffmpeg-bin/README.txt
 
       - name: Generate macOS icons
         if: matrix.platform == 'macos-latest'

@@ -6,6 +6,7 @@ import subprocess
 import platform
 import shutil
 import re
+import os
 from typing import Dict, List, Optional
 import logging
 
@@ -25,6 +26,11 @@ class HardwareDetector:
         
     def _find_ffmpeg(self, path: str) -> str:
         """Find ffmpeg executable."""
+        # Check environment variable first (set by desktop app)
+        env_ffmpeg = os.getenv("GHOSTSTREAM_FFMPEG_PATH")
+        if env_ffmpeg and os.path.exists(env_ffmpeg):
+            return env_ffmpeg
+        
         if path != "auto" and shutil.which(path):
             return path
         
@@ -49,6 +55,11 @@ class HardwareDetector:
     
     def _find_ffprobe(self) -> str:
         """Find ffprobe executable."""
+        # Check environment variable first (set by desktop app)
+        env_ffprobe = os.getenv("GHOSTSTREAM_FFPROBE_PATH")
+        if env_ffprobe and os.path.exists(env_ffprobe):
+            return env_ffprobe
+        
         ffprobe = shutil.which("ffprobe")
         if ffprobe:
             return ffprobe
