@@ -69,10 +69,15 @@ function downloadFile(url, dest, redirectCount = 0) {
         file.close();
         fs.unlinkSync(dest);
         
-        // Validate redirect location
-        const location = response.headers.location;
-        if (!location || (!location.startsWith('http://') && !location.startsWith('https://'))) {
-          return reject(new Error(`Invalid redirect location: ${location}`));
+        let location = response.headers.location;
+        if (!location) {
+          return reject(new Error('Redirect with no location header'));
+        }
+        
+        // Handle relative redirects
+        if (!location.startsWith('http://') && !location.startsWith('https://')) {
+          const urlObj = new URL(url);
+          location = `${urlObj.protocol}//${urlObj.host}${location}`;
         }
         
         return downloadFile(location, dest, redirectCount + 1).then(resolve).catch(reject);
