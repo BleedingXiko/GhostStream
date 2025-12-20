@@ -48,10 +48,29 @@ fn start_ghoststream(state: tauri::State<GhostStreamState>, app_handle: tauri::A
         return Err("GhostStream is already running on port 8765".to_string());
     }
 
-    // Get bundled ffmpeg path from resources
+    // Get bundled resources path
     let resource_path = app_handle.path_resolver().resource_dir()
         .ok_or("Failed to get resource directory")?;
     
+    // Find bundled Python
+    #[cfg(target_os = "windows")]
+    let python_exe = resource_path.join("python").join("python.exe");
+    #[cfg(target_os = "macos")]
+    let python_exe = resource_path.join("python").join("python").join("bin").join("python3");
+    #[cfg(target_os = "linux")]
+    let python_exe = resource_path.join("python").join("venv").join("bin").join("python3");
+    
+    // Use bundled Python if available, otherwise fall back to system Python
+    let python_cmd = if python_exe.exists() {
+        python_exe.to_str().unwrap().to_string()
+    } else {
+        #[cfg(target_os = "windows")]
+        { "python".to_string() }
+        #[cfg(not(target_os = "windows"))]
+        { "python3".to_string() }
+    };
+    
+    // Get bundled ffmpeg path
     #[cfg(target_os = "windows")]
     let ffmpeg_name = "ffmpeg.exe";
     #[cfg(not(target_os = "windows"))]
@@ -64,14 +83,14 @@ fn start_ghoststream(state: tauri::State<GhostStreamState>, app_handle: tauri::A
     let has_valid_ffmpeg = ffmpeg_path.exists() && 
         ffmpeg_path.metadata().map(|m| m.len() > 1000).unwrap_or(false);
 
-    // Determine the command based on OS
+    // Spawn Python process
     #[cfg(target_os = "windows")]
     let child = {
         use std::os::windows::process::CommandExt;
         use std::process::Stdio;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         
-        let mut cmd = Command::new("python");
+        let mut cmd = Command::new(&python_cmd);
         cmd.args(["-m", "ghoststream"])
             .creation_flags(CREATE_NO_WINDOW)
             .stdout(Stdio::null())
@@ -85,14 +104,14 @@ fn start_ghoststream(state: tauri::State<GhostStreamState>, app_handle: tauri::A
         }
         
         cmd.spawn()
-            .map_err(|e| format!("Failed to start GhostStream: {}", e))?
+            .map_err(|e| format!("Failed to start GhostStream with {}: {}. Is Python installed?", python_cmd, e))?
     };
 
     #[cfg(not(target_os = "windows"))]
     let child = {
         use std::process::Stdio;
         
-        let mut cmd = Command::new("python3");
+        let mut cmd = Command::new(&python_cmd);
         cmd.args(["-m", "ghoststream"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -105,22 +124,7 @@ fn start_ghoststream(state: tauri::State<GhostStreamState>, app_handle: tauri::A
         }
         
         cmd.spawn()
-            .or_else(|_| {
-                let mut cmd = Command::new("python");
-                cmd.args(["-m", "ghoststream"])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .stdin(Stdio::null());
-                
-                // Set ffmpeg path if bundled binary exists and is valid
-                if has_valid_ffmpeg {
-                    cmd.env("GHOSTSTREAM_FFMPEG_PATH", ffmpeg_path.to_str().unwrap());
-                    cmd.env("GHOSTSTREAM_FFPROBE_PATH", ffmpeg_dir.join("ffprobe").to_str().unwrap());
-                }
-                
-                cmd.spawn()
-            })
-            .map_err(|e| format!("Failed to start GhostStream: {}", e))?
+            .map_err(|e| format!("Failed to start GhostStream with {}: {}. Is Python installed?", python_cmd, e))?
     };
 
     println!("GhostStream process started with PID: {}", child.id());

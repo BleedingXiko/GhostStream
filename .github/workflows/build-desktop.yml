@@ -78,17 +78,20 @@ jobs:
         working-directory: desktop
         run: npm ci
 
-      - name: Download FFmpeg binaries (Windows/macOS only)
+      - name: Setup Python and FFmpeg bundle (Windows/macOS)
         if: matrix.platform != 'ubuntu-22.04'
         working-directory: desktop
-        run: node download-ffmpeg.js
+        run: node setup-bundle.js
 
-      - name: Skip FFmpeg download for Linux (system package used)
+      - name: Setup for Linux (install GhostStream)
         if: matrix.platform == 'ubuntu-22.04'
         working-directory: desktop/src-tauri
         run: |
-          mkdir -p ffmpeg-bin
-          # Remove ffmpeg resources from tauri.conf.json for Linux builds
+          mkdir -p ffmpeg-bin python
+          # Install GhostStream in a local directory we can bundle
+          python3 -m venv python/venv
+          python/venv/bin/pip install ../../
+          # Remove ffmpeg resources from tauri.conf.json for Linux (uses system ffmpeg)
           sed -i '/"ffmpeg-bin\/ffmpeg\*",/d' tauri.conf.json
           sed -i '/"ffmpeg-bin\/ffprobe\*"/d' tauri.conf.json
 

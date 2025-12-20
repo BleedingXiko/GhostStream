@@ -33,7 +33,8 @@
       ],
       "resources": [
         "ffmpeg-bin/ffmpeg*",
-        "ffmpeg-bin/ffprobe*"
+        "ffmpeg-bin/ffprobe*",
+        "python/**/*"
       ],
       "windows": {
         "certificateThumbprint": null,
