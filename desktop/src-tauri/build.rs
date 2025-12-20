@@ -5,7 +5,7 @@ fn main() {
     
     if !ffmpeg_bin_dir.exists() {
         eprintln!("Warning: ffmpeg-bin directory not found!");
-        eprintln!("Run 'node ../download-ffmpeg.js' to download FFmpeg binaries");
+        eprintln!("Run 'npm run download-ffmpeg' to download FFmpeg binaries");
     }
     
     tauri_build::build()

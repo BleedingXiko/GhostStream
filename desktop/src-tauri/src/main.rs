@@ -98,7 +98,6 @@ fn stop_ghoststream(state: tauri::State<GhostStreamState>) -> Result<(), String>
         // Try graceful shutdown first on Unix
         #[cfg(unix)]
         {
-            use std::os::unix::process::CommandExt;
             unsafe {
                 libc::kill(child.id() as i32, libc::SIGTERM);
             }
