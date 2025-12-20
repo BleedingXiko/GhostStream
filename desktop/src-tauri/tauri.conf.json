@@ -34,10 +34,6 @@
       "resources": [
         "ffmpeg-bin/*"
       ],
-      "externalBin": [
-        "ffmpeg-bin/ffmpeg",
-        "ffmpeg-bin/ffprobe"
-      ],
       "windows": {
         "certificateThumbprint": null,
         "digestAlgorithm": "sha256",
