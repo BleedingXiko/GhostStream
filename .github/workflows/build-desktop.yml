@@ -89,6 +89,8 @@ jobs:
         run: |
           mkdir -p ffmpeg-bin
           echo "Linux uses system ffmpeg from apt" > ffmpeg-bin/README.txt
+          touch ffmpeg-bin/ffmpeg
+          touch ffmpeg-bin/ffprobe
 
       - name: Generate macOS icons
         if: matrix.platform == 'macos-latest'

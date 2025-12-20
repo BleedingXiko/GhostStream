@@ -59,6 +59,10 @@ fn start_ghoststream(state: tauri::State<GhostStreamState>, app_handle: tauri::A
     
     let ffmpeg_path = resource_path.join("ffmpeg-bin").join(ffmpeg_name);
     let ffmpeg_dir = resource_path.join("ffmpeg-bin");
+    
+    // Check if bundled ffmpeg is valid (not just a placeholder)
+    let has_valid_ffmpeg = ffmpeg_path.exists() && 
+        ffmpeg_path.metadata().map(|m| m.len() > 1000).unwrap_or(false);
 
     // Determine the command based on OS
     #[cfg(target_os = "windows")]
@@ -74,8 +78,8 @@ fn start_ghoststream(state: tauri::State<GhostStreamState>, app_handle: tauri::A
             .stderr(Stdio::null())
             .stdin(Stdio::null());
         
-        // Set ffmpeg path if bundled binary exists
-        if ffmpeg_path.exists() {
+        // Set ffmpeg path if bundled binary exists and is valid
+        if has_valid_ffmpeg {
             cmd.env("GHOSTSTREAM_FFMPEG_PATH", ffmpeg_path.to_str().unwrap());
             cmd.env("GHOSTSTREAM_FFPROBE_PATH", ffmpeg_dir.join("ffprobe.exe").to_str().unwrap());
         }
@@ -94,8 +98,8 @@ fn start_ghoststream(state: tauri::State<GhostStreamState>, app_handle: tauri::A
             .stderr(Stdio::null())
             .stdin(Stdio::null());
         
-        // Set ffmpeg path if bundled binary exists
-        if ffmpeg_path.exists() {
+        // Set ffmpeg path if bundled binary exists and is valid
+        if has_valid_ffmpeg {
             cmd.env("GHOSTSTREAM_FFMPEG_PATH", ffmpeg_path.to_str().unwrap());
             cmd.env("GHOSTSTREAM_FFPROBE_PATH", ffmpeg_dir.join("ffprobe").to_str().unwrap());
         }
@@ -108,8 +112,8 @@ fn start_ghoststream(state: tauri::State<GhostStreamState>, app_handle: tauri::A
                     .stderr(Stdio::null())
                     .stdin(Stdio::null());
                 
-                // Set ffmpeg path if bundled binary exists
-                if ffmpeg_path.exists() {
+                // Set ffmpeg path if bundled binary exists and is valid
+                if has_valid_ffmpeg {
                     cmd.env("GHOSTSTREAM_FFMPEG_PATH", ffmpeg_path.to_str().unwrap());
                     cmd.env("GHOSTSTREAM_FFPROBE_PATH", ffmpeg_dir.join("ffprobe").to_str().unwrap());
                 }
