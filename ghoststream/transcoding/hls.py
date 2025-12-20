@@ -270,16 +270,21 @@ class HLSPlaylistGenerator:
         self,
         output_dir: Path,
         variants: List[HLSVariant],
-        include_audio_group: bool = True
+        include_audio_group: bool = True,
+        subtitle_tracks: Optional[List[Dict]] = None
     ) -> str:
         """
-        Generate Netflix-quality master playlist.
+        Generate Netflix-quality master playlist with subtitle support.
         
         Features:
         - EXT-X-VERSION: 6 for modern features
         - EXT-X-INDEPENDENT-SEGMENTS for better caching
         - Full CODECS, BANDWIDTH, AVERAGE-BANDWIDTH
+        - EXT-X-MEDIA subtitle entries for WebVTT subtitles
         - Sorted by bandwidth (highest first for faster quality selection)
+        
+        Args:
+            subtitle_tracks: List of dicts with 'label', 'language', 'default' keys
         """
         lines = [
             "#EXTM3U",
@@ -289,6 +294,20 @@ class HLSPlaylistGenerator:
         # Independent segments for better CDN caching
         if self.config.enable_independent_segments:
             lines.append("#EXT-X-INDEPENDENT-SEGMENTS")
+        
+        # Subtitle group definitions (added before audio/video for proper HLS.js support)
+        if subtitle_tracks:
+            for i, sub in enumerate(subtitle_tracks):
+                label = sub.get('label', f'Subtitle {i+1}')
+                language = sub.get('language', 'und')
+                is_default = 'YES' if sub.get('default', i == 0) else 'NO'
+                
+                # Format: EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="...",LANGUAGE="...",URI="..."
+                lines.append(
+                    f'#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="{label}",'
+                    f'DEFAULT={is_default},AUTOSELECT={is_default},FORCED=NO,'
+                    f'LANGUAGE="{language}",URI="stream_{len(variants) + i}.m3u8"'
+                )
         
         # Audio group definition (for separate audio tracks)
         if include_audio_group:

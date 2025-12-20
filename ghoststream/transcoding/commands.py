@@ -5,10 +5,11 @@ Handles HLS, batch, and ABR transcoding commands.
 
 import os
 import logging
+import httpx
 from pathlib import Path
 from typing import List, Tuple, Optional
 
-from ..models import OutputConfig, OutputFormat, VideoCodec, Resolution
+from ..models import OutputConfig, OutputFormat, VideoCodec, Resolution, SubtitleTrack
 from ..config import TranscodingConfig, HardwareConfig
 from .models import MediaInfo, QualityPreset
 from .constants import (
@@ -153,15 +154,52 @@ class CommandBuilder:
             ]
         return []
     
+    def _download_subtitles(self, subtitles: Optional[List[SubtitleTrack]], output_dir: Path) -> List[Tuple[Path, SubtitleTrack]]:
+        """Download subtitle files from URLs into the job temp directory.
+        
+        Args:
+            subtitles: List of SubtitleTrack objects with URLs
+            output_dir: Directory to save downloaded subtitle files
+            
+        Returns:
+            List of (local_path, subtitle_track) tuples for successfully downloaded subtitles
+        """
+        if not subtitles:
+            return []
+        
+        downloaded = []
+        
+        for i, sub in enumerate(subtitles):
+            try:
+                # Download subtitle file
+                with httpx.Client(timeout=30.0) as client:
+                    response = client.get(sub.url)
+                    response.raise_for_status()
+                    
+                    # Save to temp directory with safe filename
+                    sub_filename = f"subtitle_{i}_{sub.language}.vtt"
+                    sub_path = output_dir / sub_filename
+                    sub_path.write_bytes(response.content)
+                    
+                    downloaded.append((sub_path, sub))
+                    logger.info(f"[Subtitles] Downloaded: {sub.label} ({sub.language}) -> {sub_filename}")
+            except Exception as e:
+                logger.error(f"[Subtitles] Failed to download {sub.url}: {e}")
+                continue
+        
+        logger.info(f"[Subtitles] Downloaded {len(downloaded)} of {len(subtitles)} subtitle tracks")
+        return downloaded
+    
     def build_hls_command(
         self,
         source: str,
         output_dir: Path,
         output_config: OutputConfig,
         start_time: float = 0,
-        media_info: Optional[MediaInfo] = None
+        media_info: Optional[MediaInfo] = None,
+        subtitles: Optional[List[SubtitleTrack]] = None
     ) -> Tuple[List[str], str]:
-        """Build FFmpeg command for HLS output."""
+        """Build FFmpeg command for HLS output with subtitle muxing support."""
         
         video_encoder, video_args = self.encoder_selector.get_video_encoder(
             output_config.video_codec,
@@ -170,6 +208,9 @@ class CommandBuilder:
         audio_encoder, audio_args = self.encoder_selector.get_audio_encoder(
             output_config.audio_codec
         )
+        
+        # Download subtitle files if provided
+        subtitle_files = self._download_subtitles(subtitles, output_dir)
         
         cmd = [self.ffmpeg_path, "-y", "-hide_banner"]
         
@@ -188,11 +229,19 @@ class CommandBuilder:
         if start_time > 0:
             cmd.extend(["-ss", str(start_time)])
         
-        # Input
+        # Input - video source
         cmd.extend(["-i", source])
         
-        # Map streams explicitly
+        # Add subtitle inputs
+        for sub_path, _ in subtitle_files:
+            cmd.extend(["-i", str(sub_path)])
+        
+        # Map video and audio streams
         cmd.extend(["-map", "0:v:0", "-map", "0:a:0?"])
+        
+        # Map subtitle streams (input indices start at 1 for subtitles)
+        for i in range(len(subtitle_files)):
+            cmd.extend(["-map", f"{i+1}:0"])
         
         # Video encoding
         cmd.extend(["-c:v", video_encoder])
@@ -232,21 +281,52 @@ class CommandBuilder:
             audio_br = AUDIO_BITRATE_MAP.get(channels, "128k")
             cmd.extend(["-b:a", audio_br, "-ac", str(min(channels, 2))])
         
+        # Subtitle encoding - WebVTT for HLS
+        if subtitle_files:
+            for i in range(len(subtitle_files)):
+                cmd.extend([f"-c:s:{i}", "webvtt"])
+        
         # HLS specific options
         segment_duration = self.transcoding_config.segment_duration
-        playlist_path = output_dir / "master.m3u8"
-        segment_pattern = output_dir / "segment_%05d.ts"
         
-        cmd.extend([
-            "-f", "hls",
-            "-hls_time", str(segment_duration),
-            "-hls_list_size", "0",
-            "-hls_segment_filename", str(segment_pattern),
-            "-hls_flags", "independent_segments+append_list",
-            "-hls_segment_type", "mpegts",
-            "-hls_playlist_type", "event",
-            str(playlist_path)
-        ])
+        # Use var_stream_map for subtitle support (enables master playlist with EXT-X-MEDIA)
+        if subtitle_files:
+            # With subtitles, use var_stream_map for proper HLS structure
+            segment_path = str(output_dir / "stream_%v_%05d.ts").replace("\\", "/")
+            playlist_path = str(output_dir / "stream_%v.m3u8").replace("\\", "/")
+            
+            # Build var_stream_map: v:0,a:0 for video/audio, then s:0,s:1... for subtitles
+            stream_map_parts = ["v:0,a:0"]
+            for i in range(len(subtitle_files)):
+                stream_map_parts.append(f"s:{i},sgroup:subs")
+            
+            cmd.extend([
+                "-f", "hls",
+                "-hls_time", str(segment_duration),
+                "-hls_list_size", "0",
+                "-hls_segment_filename", segment_path,
+                "-hls_flags", "independent_segments+append_list",
+                "-hls_segment_type", "mpegts",
+                "-hls_playlist_type", "event",
+                "-master_pl_name", "master.m3u8",
+                "-var_stream_map", " ".join(stream_map_parts),
+                playlist_path
+            ])
+        else:
+            # No subtitles - use simple single-stream HLS
+            playlist_path = output_dir / "master.m3u8"
+            segment_pattern = output_dir / "segment_%05d.ts"
+            
+            cmd.extend([
+                "-f", "hls",
+                "-hls_time", str(segment_duration),
+                "-hls_list_size", "0",
+                "-hls_segment_filename", str(segment_pattern),
+                "-hls_flags", "independent_segments+append_list",
+                "-hls_segment_type", "mpegts",
+                "-hls_playlist_type", "event",
+                str(playlist_path)
+            ])
         
         return cmd, video_encoder
     
@@ -407,9 +487,10 @@ class CommandBuilder:
         output_config: OutputConfig,
         media_info: MediaInfo,
         start_time: float = 0,
-        variants: Optional[List[QualityPreset]] = None
+        variants: Optional[List[QualityPreset]] = None,
+        subtitles: Optional[List[SubtitleTrack]] = None
     ) -> Tuple[List[str], str, List[QualityPreset]]:
-        """Build FFmpeg command for ABR HLS with multiple quality variants."""
+        """Build FFmpeg command for ABR HLS with multiple quality variants and subtitle support."""
         
         video_encoder, video_args = self.encoder_selector.get_video_encoder(
             output_config.video_codec,
@@ -419,6 +500,9 @@ class CommandBuilder:
         
         if variants is None:
             variants = self.get_abr_variants(media_info)
+        
+        # Download subtitle files if provided
+        subtitle_files = self._download_subtitles(subtitles, output_dir)
         
         cmd = [self.ffmpeg_path, "-y", "-hide_banner"]
         
@@ -437,8 +521,12 @@ class CommandBuilder:
         if start_time > 0:
             cmd.extend(["-ss", str(start_time)])
         
-        # Input
+        # Input - video source
         cmd.extend(["-i", source])
+        
+        # Add subtitle inputs
+        for sub_path, _ in subtitle_files:
+            cmd.extend(["-i", str(sub_path)])
         
         # Build filter complex for multiple outputs
         filter_parts = self.filter_builder.build_abr_filter_complex(
@@ -506,6 +594,17 @@ class CommandBuilder:
             
             # Build var_stream_map entry: v:i,a:i (video stream i, audio stream i)
             stream_maps.append(f"v:{i},a:{i}")
+        
+        # Map subtitle streams if present
+        if subtitle_files:
+            for sub_idx in range(len(subtitle_files)):
+                # Subtitle input indices start after video source (input 0)
+                input_idx = sub_idx + 1
+                map_args.extend(["-map", f"{input_idx}:0"])
+                # Subtitle codec
+                map_args.extend([f"-c:s:{sub_idx}", "webvtt"])
+                # Add subtitle streams to var_stream_map with sgroup
+                stream_maps.append(f"s:{sub_idx},sgroup:subs")
         
         # Apply filter complex
         if filter_parts:

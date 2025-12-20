@@ -171,7 +171,8 @@ class JobManager:
                 output_config=job.request.output,
                 start_time=job.request.start_time,
                 progress_callback=progress_callback,
-                cancel_event=job.cancel_event
+                cancel_event=job.cancel_event,
+                subtitles=job.request.subtitles
             )
         else:
             # Standard transcoding (stream or batch)
@@ -182,7 +183,8 @@ class JobManager:
                 output_config=job.request.output,
                 start_time=job.request.start_time,
                 progress_callback=progress_callback,
-                cancel_event=job.cancel_event
+                cancel_event=job.cancel_event,
+                subtitles=job.request.subtitles
             )
         
         job.hw_accel_used = hw_accel

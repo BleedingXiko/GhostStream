@@ -167,11 +167,12 @@ class TranscodeEngine:
         output_dir: Path,
         output_config: OutputConfig,
         start_time: float = 0,
-        media_info: Optional[MediaInfo] = None
+        media_info: Optional[MediaInfo] = None,
+        subtitles: Optional[List] = None
     ) -> Tuple[List[str], str]:
         """Build FFmpeg command for HLS output."""
         return self.command_builder.build_hls_command(
-            source, output_dir, output_config, start_time, media_info
+            source, output_dir, output_config, start_time, media_info, subtitles
         )
     
     def build_batch_command(
@@ -198,11 +199,12 @@ class TranscodeEngine:
         output_config: OutputConfig,
         media_info: MediaInfo,
         start_time: float = 0,
-        variants: Optional[List[QualityPreset]] = None
+        variants: Optional[List[QualityPreset]] = None,
+        subtitles: Optional[List] = None
     ) -> Tuple[List[str], str, List[QualityPreset]]:
         """Build FFmpeg command for ABR HLS."""
         return self.command_builder.build_abr_command(
-            source, output_dir, output_config, media_info, start_time, variants
+            source, output_dir, output_config, media_info, start_time, variants, subtitles
         )
     
     def get_abr_variants(self, media_info: MediaInfo) -> List[QualityPreset]:
@@ -715,7 +717,8 @@ class TranscodeEngine:
         job_dir: Path,
         output_config: OutputConfig,
         start_time: float,
-        media_info: MediaInfo
+        media_info: MediaInfo,
+        subtitles: Optional[List] = None
     ) -> Tuple[List[str], str, str]:
         """
         Build the FFmpeg command for transcoding.
@@ -728,7 +731,7 @@ class TranscodeEngine:
         """
         if mode == TranscodeMode.STREAM:
             cmd, encoder_used = self.build_hls_command(
-                source, job_dir, output_config, start_time, media_info
+                source, job_dir, output_config, start_time, media_info, subtitles
             )
             output_path = str(job_dir / "master.m3u8")
         else:
@@ -1114,7 +1117,8 @@ class TranscodeEngine:
         output_config: OutputConfig,
         start_time: float = 0,
         progress_callback: Optional[Callable[[TranscodeProgress], None]] = None,
-        cancel_event: Optional[asyncio.Event] = None
+        cancel_event: Optional[asyncio.Event] = None,
+        subtitles: Optional[List] = None
     ) -> Tuple[bool, str, Optional[str]]:
         """
         Execute transcoding with retry logic and hardware fallback.
@@ -1153,7 +1157,7 @@ class TranscodeEngine:
                 
                 # Build command
                 cmd, encoder_used, output_path = self._build_transcode_command(
-                    mode, source, job_dir, current_config, start_time, media_info
+                    mode, source, job_dir, current_config, start_time, media_info, subtitles
                 )
                 
                 await self._job_registry.update_status(job_id, "running", encoder=encoder_used)
@@ -1196,7 +1200,8 @@ class TranscodeEngine:
         output_config: OutputConfig,
         start_time: float = 0,
         progress_callback: Optional[Callable[[TranscodeProgress], None]] = None,
-        cancel_event: Optional[asyncio.Event] = None
+        cancel_event: Optional[asyncio.Event] = None,
+        subtitles: Optional[List] = None
     ) -> Tuple[bool, str, Optional[str]]:
         """
         Execute ABR transcoding with multiple quality variants.
@@ -1239,7 +1244,7 @@ class TranscodeEngine:
                 variants = self.get_optimal_presets(media_info)
                 
                 cmd, encoder_used, variants = self.build_abr_command(
-                    source, job_dir, current_config, media_info, start_time, variants
+                    source, job_dir, current_config, media_info, start_time, variants, subtitles
                 )
                 
                 # Validate bitrate spacing

@@ -65,6 +65,14 @@ class JobStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+class SubtitleTrack(BaseModel):
+    """Represents a subtitle track for HLS muxing."""
+    url: str = Field(..., description="URL to fetch the WebVTT subtitle file")
+    label: Optional[str] = Field(default=None, description="Display label for the subtitle track")
+    language: Optional[str] = Field(default="und", description="Language code (ISO 639-2)")
+    default: bool = Field(default=False, description="Whether this subtitle should be default")
+
+
 class OutputConfig(BaseModel):
     format: OutputFormat = OutputFormat.HLS
     video_codec: VideoCodec = VideoCodec.H264
@@ -85,6 +93,7 @@ class TranscodeRequest(BaseModel):
     start_time: float = Field(default=0, description="Start position in seconds")
     callback_url: Optional[str] = Field(default=None, description="URL to call when job completes")
     session_id: Optional[str] = Field(default=None, description="Viewer session ID for stream sharing")
+    subtitles: Optional[List[SubtitleTrack]] = Field(default=None, description="Subtitle tracks to mux into HLS stream")
 
 
 class TranscodeResponse(BaseModel):

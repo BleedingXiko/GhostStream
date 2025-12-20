@@ -42,16 +42,50 @@ jobs:
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.0-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y libwebkit2gtk-4.0-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf imagemagick
+
+      - name: Generate Linux icons
+        if: matrix.platform == 'ubuntu-22.04'
+        working-directory: desktop/src-tauri/icons
+        run: |
+          # Generate required icon sizes for Linux from 1024px source
+          convert Ghosthub1024.png -resize 32x32 32x32.png
+          convert Ghosthub1024.png -resize 128x128 128x128.png
+          convert Ghosthub1024.png -resize 256x256 128x128@2x.png
+
+      - name: Generate Windows icons
+        if: matrix.platform == 'windows-latest'
+        working-directory: desktop/src-tauri/icons
+        shell: pwsh
+        run: |
+          # Use PowerShell to resize images (via .NET)
+          Add-Type -AssemblyName System.Drawing
+          $src = [System.Drawing.Image]::FromFile("$PWD/Ghosthub1024.png")
+          foreach ($size in @(32, 128, 256)) {
+            $bmp = New-Object System.Drawing.Bitmap($size, $size)
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+            $g.DrawImage($src, 0, 0, $size, $size)
+            $g.Dispose()
+            if ($size -eq 32) { $bmp.Save("$PWD/32x32.png") }
+            elseif ($size -eq 128) { $bmp.Save("$PWD/128x128.png") }
+            elseif ($size -eq 256) { $bmp.Save("$PWD/128x128@2x.png") }
+            $bmp.Dispose()
+          }
+          $src.Dispose()
 
       - name: Install frontend dependencies
         working-directory: desktop
         run: npm ci
 
-      - name: Generate macOS icon (.icns)
+      - name: Generate macOS icons
         if: matrix.platform == 'macos-latest'
         working-directory: desktop/src-tauri/icons
         run: |
+          # Generate standard icon sizes
+          sips -z 32 32     Ghosthub1024.png --out 32x32.png
+          sips -z 128 128   Ghosthub1024.png --out 128x128.png
+          sips -z 256 256   Ghosthub1024.png --out 128x128@2x.png
           # Generate .icns from the 1024px PNG using iconutil
           mkdir -p Ghosthub.iconset
           sips -z 16 16     Ghosthub1024.png --out Ghosthub.iconset/icon_16x16.png

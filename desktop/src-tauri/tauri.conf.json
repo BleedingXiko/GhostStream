@@ -22,6 +22,9 @@
       "targets": "all",
       "identifier": "com.ghoststream.desktop",
       "icon": [
+        "icons/32x32.png",
+        "icons/128x128.png",
+        "icons/128x128@2x.png",
         "icons/Ghosthub192.png",
         "icons/Ghosthub512.png",
         "icons/Ghosthub1024.png",
