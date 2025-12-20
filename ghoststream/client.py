@@ -1171,6 +1171,8 @@ class GhostStreamLoadBalancer:
         self._round_robin_index = 0
         self._stats_lock = asyncio.Lock()
         self._job_server_map: Dict[str, str] = {}  # job_id -> server_name
+        self._stats_cache_ttl = 5.0  # Cache stats for 5 seconds
+        self._last_stats_refresh = 0.0
         
         # Add manual servers
         if manual_servers:
@@ -1245,19 +1247,35 @@ class GhostStreamLoadBalancer:
                 self.server_stats[name] = ServerStats()
                 logger.debug(f"[LoadBalancer] Created stats for server: {name}")
         
-        # For speed, just use the first available server without health check
-        # Health check can cause delays and timeouts
-        server = next(iter(self.client.servers.values()))
-        logger.info(f"[LoadBalancer] Selected server: {server.name} ({server.host}:{server.port})")
-        return server
+        # Refresh stats if cache expired (non-blocking)
+        current_time = time.time()
+        if current_time - self._last_stats_refresh > self._stats_cache_ttl:
+            # Trigger refresh in background, don't block selection
+            asyncio.create_task(self._refresh_stats_background())
+        
+        # Use strategy-based selection
+        return await self._select_server_with_strategy()
     
-    async def _select_server_advanced(self) -> Optional[GhostStreamServer]:
-        """Advanced server selection with load balancing (unused for now)."""
+    async def _refresh_stats_background(self) -> None:
+        """Refresh stats in background without blocking."""
+        self._last_stats_refresh = time.time()
+        try:
+            await self.refresh_stats()
+        except Exception as e:
+            logger.warning(f"[LoadBalancer] Background stats refresh failed: {e}")
+    
+    async def _select_server_with_strategy(self) -> Optional[GhostStreamServer]:
+        """Select server based on configured load balancing strategy."""
         healthy_servers = [
             (name, self.client.servers[name])
             for name, stats in self.server_stats.items()
             if stats.is_healthy and name in self.client.servers
         ]
+        
+        # If no healthy servers, use all servers (stats might be stale)
+        if not healthy_servers:
+            logger.warning("[LoadBalancer] No healthy servers, using all available")
+            healthy_servers = [(name, server) for name, server in self.client.servers.items()]
         
         if not healthy_servers:
             return None

@@ -20,7 +20,13 @@ from pathlib import Path
 # Colors for terminal output (works on all platforms)
 class Colors:
     if sys.platform == "win32":
-        os.system("")  # Enable ANSI on Windows
+        # Enable ANSI escape sequences on Windows 10+
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
+        except Exception:
+            pass  # Silently fail on older Windows versions
     GREEN = "\033[92m"
     YELLOW = "\033[93m"
     RED = "\033[91m"

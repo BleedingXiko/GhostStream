@@ -702,8 +702,15 @@ class TranscodeEngine:
             Tuple of (media_info, job_dir, error_message)
         """
         media_info = await self.get_media_info(source)
-        if media_info.duration == 0:
+        
+        # Validate duration is reasonable
+        if media_info.duration <= 0:
             return None, None, f"Failed to get media info from: {source}. Check URL accessibility."
+        
+        # Sanity check: reject unreasonably long durations (>48 hours = likely corrupt metadata)
+        MAX_DURATION = 48 * 3600  # 48 hours in seconds
+        if media_info.duration > MAX_DURATION:
+            return None, None, f"Media duration too large ({media_info.duration}s). Possible corrupt metadata."
         
         job_dir = self.temp_dir / job_id
         job_dir.mkdir(parents=True, exist_ok=True)

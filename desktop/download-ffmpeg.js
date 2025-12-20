@@ -45,8 +45,15 @@ function getPlatformKey() {
   throw new Error(`Unsupported platform: ${platform}-${arch}`);
 }
 
-function downloadFile(url, dest) {
+function downloadFile(url, dest, redirectCount = 0) {
+  const MAX_REDIRECTS = 5;
+  
   return new Promise((resolve, reject) => {
+    // Prevent infinite redirect loops
+    if (redirectCount > MAX_REDIRECTS) {
+      return reject(new Error(`Too many redirects (${redirectCount})`));
+    }
+    
     const file = fs.createWriteStream(dest);
     const protocol = url.startsWith('https') ? https : http;
     
@@ -56,7 +63,14 @@ function downloadFile(url, dest) {
       if (response.statusCode === 302 || response.statusCode === 301) {
         file.close();
         fs.unlinkSync(dest);
-        return downloadFile(response.headers.location, dest).then(resolve).catch(reject);
+        
+        // Validate redirect location
+        const location = response.headers.location;
+        if (!location || (!location.startsWith('http://') && !location.startsWith('https://'))) {
+          return reject(new Error(`Invalid redirect location: ${location}`));
+        }
+        
+        return downloadFile(location, dest, redirectCount + 1).then(resolve).catch(reject);
       }
       
       if (response.statusCode !== 200) {

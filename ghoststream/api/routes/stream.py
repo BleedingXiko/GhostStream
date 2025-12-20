@@ -60,7 +60,21 @@ async def stream_file(job_id: str, filename: str, request: Request):
     
     config = get_config()
     temp_dir = Path(config.transcoding.temp_directory)
+    
+    # Security: Prevent path traversal attacks
+    if ".." in filename or filename.startswith("/") or "\\" in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    
     file_path = temp_dir / job_id / filename
+    
+    # Validate resolved path is within job directory
+    try:
+        file_path = file_path.resolve()
+        job_dir = (temp_dir / job_id).resolve()
+        if not str(file_path).startswith(str(job_dir)):
+            raise HTTPException(status_code=403, detail="Access denied")
+    except (ValueError, OSError):
+        raise HTTPException(status_code=400, detail="Invalid path")
     
     # For playlist files, wait for FFmpeg to create them
     # HDR/complex files can take 10-20s to produce first segments

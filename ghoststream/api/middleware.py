@@ -2,6 +2,7 @@
 API middleware for GhostStream
 """
 
+import secrets
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
@@ -30,10 +31,10 @@ async def api_key_middleware(request: Request, call_next):
     if not api_key:
         return await call_next(request)
     
-    # Check API key
+    # Check API key using constant-time comparison to prevent timing attacks
     request_key = request.headers.get("X-API-Key") or request.query_params.get("api_key")
     
-    if request_key != api_key:
+    if not request_key or not secrets.compare_digest(request_key, api_key):
         return JSONResponse(
             status_code=401,
             content={"detail": "Invalid or missing API key"}
