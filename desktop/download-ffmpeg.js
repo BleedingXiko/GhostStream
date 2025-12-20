@@ -1,11 +1,16 @@
 #!/usr/bin/env node
 
-const https = require('https');
-const http = require('http');
-const fs = require('fs');
-const path = require('path');
-const { execSync } = require('child_process');
-const os = require('os');
+import https from 'https';
+import http from 'http';
+import fs from 'fs';
+import path from 'path';
+import { execSync } from 'child_process';
+import os from 'os';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 const BIN_DIR = path.join(__dirname, 'src-tauri', 'ffmpeg-bin');
 
