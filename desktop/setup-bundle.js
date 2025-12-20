@@ -21,6 +21,7 @@ const PYTHON_URLS = {
   'darwin-x64': 'https://github.com/indygreg/python-build-standalone/releases/download/20240224/cpython-3.11.8+20240224-x86_64-apple-darwin-install_only.tar.gz',
   'darwin-arm64': 'https://github.com/indygreg/python-build-standalone/releases/download/20240224/cpython-3.11.8+20240224-aarch64-apple-darwin-install_only.tar.gz',
 };
+const PROJECT_ROOT = path.join(__dirname, '..');
 
 // FFmpeg download URLs
 const FFMPEG_URLS = {
@@ -92,6 +93,26 @@ function downloadFile(url, dest, redirectCount = 0) {
   });
 }
 
+function setupSystemFFmpegWrappers() {
+  console.log('\n=== Configuring FFmpeg wrappers (system ffmpeg) ===');
+
+  if (fs.existsSync(BIN_DIR)) {
+    fs.rmSync(BIN_DIR, { recursive: true, force: true });
+  }
+  fs.mkdirSync(BIN_DIR, { recursive: true });
+
+  const ffmpegWrapper = '#!/bin/sh\nexec ffmpeg "$@"\n';
+  const ffprobeWrapper = '#!/bin/sh\nexec ffprobe "$@"\n';
+
+  const ffmpegPath = path.join(BIN_DIR, 'ffmpeg');
+  const ffprobePath = path.join(BIN_DIR, 'ffprobe');
+
+  fs.writeFileSync(ffmpegPath, ffmpegWrapper, { mode: 0o755 });
+  fs.writeFileSync(ffprobePath, ffprobeWrapper, { mode: 0o755 });
+
+  console.log('✓ Created FFmpeg wrappers that use system binaries');
+}
+
 async function downloadFFmpeg(platform, arch, key) {
   console.log('\n=== Downloading FFmpeg ===');
   
@@ -144,12 +165,35 @@ async function downloadFFmpeg(platform, arch, key) {
   console.log('✓ FFmpeg downloaded');
 }
 
+async function setupLinuxPython() {
+  console.log('\n=== Setting up Python (Linux) ===');
+
+  if (fs.existsSync(PYTHON_DIR)) {
+    fs.rmSync(PYTHON_DIR, { recursive: true, force: true });
+  }
+  fs.mkdirSync(PYTHON_DIR, { recursive: true });
+
+  const venvDir = path.join(PYTHON_DIR, 'venv');
+  console.log('Creating virtual environment...');
+  execSync(`python3 -m venv "${venvDir}"`, { stdio: 'inherit' });
+
+  const pythonExe = path.join(venvDir, 'bin', 'python3');
+  console.log('Installing GhostStream into virtualenv...');
+  execSync(`"${pythonExe}" -m pip install "${PROJECT_ROOT}"`, { stdio: 'inherit' });
+
+  console.log('✓ Python setup complete (Linux virtualenv)');
+  return pythonExe;
+}
+
 async function downloadPython(platform, arch, key) {
+  if (platform === 'linux') {
+    return setupLinuxPython();
+  }
+
   console.log('\n=== Downloading Python ===');
   
   if (!PYTHON_URLS[key]) {
-    console.log(`No Python download for ${key}, skipping...`);
-    return null;
+    throw new Error(`No Python download configured for ${key}`);
   }
 
   // Create python directory
@@ -211,8 +255,7 @@ async function downloadPython(platform, arch, key) {
 
   // Install ghoststream
   console.log('Installing GhostStream...');
-  const projectRoot = path.join(__dirname, '..');
-  execSync(`"${pythonExe}" -m pip install "${projectRoot}"`, { stdio: 'inherit' });
+  execSync(`"${pythonExe}" -m pip install "${PROJECT_ROOT}"`, { stdio: 'inherit' });
 
   console.log('✓ Python setup complete');
   return pythonExe;
@@ -230,6 +273,7 @@ async function main() {
     await downloadFFmpeg(platform, arch, key);
   } else {
     console.log('FFmpeg: Using system package');
+    setupSystemFFmpegWrappers();
   }
 
   // Download Python
