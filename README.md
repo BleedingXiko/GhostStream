@@ -83,6 +83,7 @@ See the `examples/` directory for additional usage examples.
 
 - **HLS Streaming** - Real-time transcoding with immediate playback
 - **Adaptive Bitrate (ABR)** - Multiple quality variants for bandwidth adaptation
+- **Subtitle Muxing** - Native WebVTT subtitle support in HLS streams
 - **HDR to SDR** - Automatic tone mapping for HDR content
 - **Codec Support** - H.264, H.265/HEVC, VP9, AV1
 - **Batch Processing** - Queue multiple files with optional two-pass encoding
@@ -126,7 +127,15 @@ See the `examples/` directory for additional usage examples.
     "audio_codec": "aac",     // "aac", "opus", "copy"
     "hw_accel": "auto"        // "auto", "nvenc", "qsv", "software"
   },
-  "start_time": 0             // Seek to position (seconds)
+  "start_time": 0,            // Seek to position (seconds)
+  "subtitles": [              // Optional: Subtitle tracks to mux
+    {
+      "url": "https://example.com/subtitle.vtt",
+      "label": "English",
+      "language": "en",
+      "default": true
+    }
+  ]
 }
 ```
 

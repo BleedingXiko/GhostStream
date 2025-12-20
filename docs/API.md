@@ -175,6 +175,20 @@ Content-Type: application/json
     "max_audio_channels": 2
   },
   "start_time": 0,
+  "subtitles": [
+    {
+      "url": "http://192.168.4.1:5000/subtitles/english.vtt",
+      "label": "English",
+      "language": "en",
+      "default": true
+    },
+    {
+      "url": "http://192.168.4.1:5000/subtitles/spanish.vtt",
+      "label": "Español",
+      "language": "es",
+      "default": false
+    }
+  ],
   "callback_url": null
 }
 ```
@@ -195,6 +209,11 @@ Content-Type: application/json
 | `output.two_pass` | bool | Two-pass encoding for batch mode (default: false) |
 | `output.max_audio_channels` | int | Max audio channels, 2=stereo, 6=5.1 (default: 2) |
 | `start_time` | number | Start position in seconds (for seeking) |
+| `subtitles` | array | Optional subtitle tracks to mux into HLS stream (WebVTT format) |
+| `subtitles[].url` | string | URL to fetch WebVTT subtitle file |
+| `subtitles[].label` | string | Display name for subtitle track (e.g., "English") |
+| `subtitles[].language` | string | ISO 639-1 language code (e.g., "en", "es") |
+| `subtitles[].default` | bool | Whether this subtitle track is selected by default |
 | `callback_url` | string | URL to POST when job completes (optional) |
 
 **Modes:**
@@ -246,6 +265,36 @@ curl -X POST http://192.168.4.2:8765/api/transcode/start \
 ```
 
 ABR automatically creates quality variants based on source resolution (won't upscale).
+
+**Example - With Subtitles:**
+```bash
+curl -X POST http://192.168.4.2:8765/api/transcode/start \
+  -H "Content-Type: application/json" \
+  -d '{
+    "source": "http://192.168.4.1:5000/media/movie.mkv",
+    "mode": "stream",
+    "output": {
+      "video_codec": "h264",
+      "resolution": "1080p"
+    },
+    "subtitles": [
+      {
+        "url": "http://192.168.4.1:5000/subtitles/english.vtt",
+        "label": "English",
+        "language": "en",
+        "default": true
+      },
+      {
+        "url": "http://192.168.4.1:5000/subtitles/spanish.vtt",
+        "label": "Español",
+        "language": "es",
+        "default": false
+      }
+    ]
+  }'
+```
+
+Subtitles are muxed directly into the HLS stream using WebVTT format and appear as native subtitle tracks in the HLS master playlist (`EXT-X-MEDIA:TYPE=SUBTITLES`). Players like HLS.js, VLC, and Safari will display them as selectable subtitle tracks.
 
 ---
 
