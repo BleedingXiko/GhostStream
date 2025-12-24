@@ -20,6 +20,7 @@ const PYTHON_URLS = {
   'win32-x64': 'https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip',
   'darwin-x64': 'https://github.com/indygreg/python-build-standalone/releases/download/20240224/cpython-3.11.8+20240224-x86_64-apple-darwin-install_only.tar.gz',
   'darwin-arm64': 'https://github.com/indygreg/python-build-standalone/releases/download/20240224/cpython-3.11.8+20240224-aarch64-apple-darwin-install_only.tar.gz',
+  'linux-x64': 'https://github.com/indygreg/python-build-standalone/releases/download/20240224/cpython-3.11.8+20240224-x86_64-unknown-linux-gnu-install_only.tar.gz'
 };
 const PROJECT_ROOT = path.join(__dirname, '..');
 
@@ -165,31 +166,7 @@ async function downloadFFmpeg(platform, arch, key) {
   console.log('✓ FFmpeg downloaded');
 }
 
-async function setupLinuxPython() {
-  console.log('\n=== Setting up Python (Linux) ===');
-
-  if (fs.existsSync(PYTHON_DIR)) {
-    fs.rmSync(PYTHON_DIR, { recursive: true, force: true });
-  }
-  fs.mkdirSync(PYTHON_DIR, { recursive: true });
-
-  const venvDir = path.join(PYTHON_DIR, 'venv');
-  console.log('Creating virtual environment...');
-  execSync(`python3 -m venv "${venvDir}"`, { stdio: 'inherit' });
-
-  const pythonExe = path.join(venvDir, 'bin', 'python3');
-  console.log('Installing GhostStream into virtualenv...');
-  execSync(`"${pythonExe}" -m pip install "${PROJECT_ROOT}"`, { stdio: 'inherit' });
-
-  console.log('✓ Python setup complete (Linux virtualenv)');
-  return pythonExe;
-}
-
 async function downloadPython(platform, arch, key) {
-  if (platform === 'linux') {
-    return setupLinuxPython();
-  }
-
   console.log('\n=== Downloading Python ===');
   
   if (!PYTHON_URLS[key]) {

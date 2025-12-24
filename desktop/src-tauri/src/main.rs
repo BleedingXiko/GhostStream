@@ -58,7 +58,7 @@ fn start_ghoststream(state: tauri::State<GhostStreamState>, app_handle: tauri::A
     #[cfg(target_os = "macos")]
     let python_exe = resource_path.join("python").join("python").join("bin").join("python3");
     #[cfg(target_os = "linux")]
-    let python_exe = resource_path.join("python").join("venv").join("bin").join("python3");
+    let python_exe = resource_path.join("python").join("python").join("bin").join("python3");
     
     // Use bundled Python if available, otherwise fall back to system Python
     let python_cmd = if python_exe.exists() {
