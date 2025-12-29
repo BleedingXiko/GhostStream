@@ -65,22 +65,38 @@ async def lifespan(app: FastAPI):
     # Start job manager
     await job_manager.start()
     
-    # Start mDNS service in background (don't block startup)
-    mdns_service = GhostStreamService(config.server.host, config.server.port)
-    asyncio.get_event_loop().run_in_executor(None, mdns_service.start)
-    asyncio.get_event_loop().run_in_executor(None, mdns_service.start_udp_responder)
-    
-    # Start GhostHub registration if configured
-    if config.ghosthub.url and config.ghosthub.auto_register:
+    # Try HTTP push-registration first, fall back to mDNS if it fails
+    # This ensures only ONE discovery method succeeds (no duplicates)
+    http_registration_succeeded = False
+
+    if config.ghosthub.auto_register:
         ghosthub_registration = GhostHubRegistration(
-            ghosthub_url=config.ghosthub.url,
+            ghosthub_url=config.ghosthub.url or "",
             port=config.server.port
         )
-        asyncio.create_task(
-            ghosthub_registration.start_periodic_registration(
-                interval_seconds=config.ghosthub.register_interval_seconds
-            )
+        # Try immediate discovery
+        success, discovered_url = await asyncio.get_event_loop().run_in_executor(
+            None, ghosthub_registration.discover_and_register
         )
+
+        if success:
+            http_registration_succeeded = True
+            ghosthub_registration._discovered_url = discovered_url
+            logger.info("[Discovery] HTTP push-registration succeeded, skipping mDNS")
+            # Start periodic re-registration using discovered URL
+            asyncio.create_task(
+                ghosthub_registration.start_periodic_registration_with_discovery(
+                    interval_seconds=config.ghosthub.register_interval_seconds
+                )
+            )
+        else:
+            logger.info("[Discovery] HTTP push-registration failed, falling back to mDNS")
+
+    # Only start mDNS if HTTP registration didn't work
+    if not http_registration_succeeded:
+        mdns_service = GhostStreamService(config.server.host, config.server.port)
+        asyncio.get_event_loop().run_in_executor(None, mdns_service.start)
+        asyncio.get_event_loop().run_in_executor(None, mdns_service.start_udp_responder)
     
     # Ensure temp directory exists
     temp_dir = Path(config.transcoding.temp_directory)
