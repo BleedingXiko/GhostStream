@@ -53,6 +53,7 @@ def main():
         "--onefile",
         "--console",
         "--noconfirm",
+        f"--icon=desktop/src-tauri/icons/Ghosthub.ico",
         "--collect-all=ghoststream",
         "--collect-all=uvicorn",
         "--collect-all=starlette",
