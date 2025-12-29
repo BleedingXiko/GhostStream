@@ -82,6 +82,86 @@ jobs:
         working-directory: desktop
         run: node setup-bundle.js
 
+      - name: Fix Python bundle for Linux
+        if: matrix.platform == 'ubuntu-22.04'
+        working-directory: desktop/src-tauri/python
+        run: |
+          echo "=== Python directory structure before cleanup ==="
+          ls -la
+          ls -la python/ 2>/dev/null || true
+
+          # Remove broken symlinks first
+          find . -xtype l -delete 2>/dev/null || true
+
+          # Convert file symlinks to actual files
+          find . -type l | while read link; do
+            target=$(readlink -f "$link")
+            if [ -f "$target" ]; then
+              rm "$link"
+              cp "$target" "$link"
+            elif [ -d "$target" ]; then
+              rm "$link"
+              cp -r "$target" "$link"
+            else
+              # Broken symlink - remove it
+              rm -f "$link"
+            fi
+          done
+
+          # Remove unnecessary files to reduce bundle size
+          find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+          find . -name "*.pyc" -delete 2>/dev/null || true
+          find . -type d -name "test" -exec rm -rf {} + 2>/dev/null || true
+          find . -type d -name "tests" -exec rm -rf {} + 2>/dev/null || true
+          find . -type d -name "idle_test" -exec rm -rf {} + 2>/dev/null || true
+          find . -name "*.pyo" -delete 2>/dev/null || true
+          find . -name "*.a" -delete 2>/dev/null || true
+          rm -rf python/share 2>/dev/null || true
+          rm -rf python/include 2>/dev/null || true
+
+          # Remove any special files that might cause bundling issues
+          find . -type p -delete 2>/dev/null || true  # Named pipes
+          find . -type s -delete 2>/dev/null || true  # Sockets
+          find . -type c -delete 2>/dev/null || true  # Character devices
+          find . -type b -delete 2>/dev/null || true  # Block devices
+
+          # Remove lib-dynload if it exists (can have issues with ELF files)
+          # Actually, keep this as it's needed for native modules
+
+          echo "=== Python directory structure after cleanup ==="
+          ls -la
+          du -sh . || true
+
+      - name: Verify Tauri resources exist (Linux only)
+        if: matrix.platform == 'ubuntu-22.04'
+        working-directory: desktop/src-tauri
+        run: |
+          echo "=== Checking required resources ==="
+          echo "FFmpeg binaries:"
+          ls -la ffmpeg-bin/ || echo "ERROR: ffmpeg-bin directory not found!"
+          echo ""
+          echo "Python directory:"
+          ls -la python/ || echo "ERROR: python directory not found!"
+          echo ""
+          echo "Python bin (for executables):"
+          ls -la python/python/bin/ 2>/dev/null || echo "Python bin at different path or not found"
+          echo ""
+          echo "Testing resource patterns:"
+          echo "ffmpeg-bin/ffmpeg*:"
+          ls -la ffmpeg-bin/ffmpeg* 2>/dev/null || echo "No matches"
+          echo "ffmpeg-bin/ffprobe*:"
+          ls -la ffmpeg-bin/ffprobe* 2>/dev/null || echo "No matches"
+          echo "python/**/* count:"
+          find python -type f | wc -l || echo "0 files"
+          echo ""
+          echo "Fixing file permissions..."
+          chmod -R u+r python/ || true
+          chmod -R u+r ffmpeg-bin/ || true
+          chmod +x ffmpeg-bin/ffmpeg ffmpeg-bin/ffprobe 2>/dev/null || true
+          # Ensure no broken symlinks remain
+          find . -xtype l -delete 2>/dev/null || true
+          echo "Done."
+
       - name: Generate macOS icons
         if: matrix.platform == 'macos-latest'
         working-directory: desktop/src-tauri/icons

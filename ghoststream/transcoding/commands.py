@@ -246,17 +246,21 @@ class CommandBuilder:
         # Video encoding
         cmd.extend(["-c:v", video_encoder])
         cmd.extend(video_args)
-        
+
         # Build and apply video filters
         vf_filters = self.filter_builder.build_video_filters(
             media_info, output_config, video_encoder
         )
-        # Ensure compatible pixel format for software encoders
-        if vf_filters and "lib" in video_encoder:
-            vf_filters.append("format=yuv420p")
+        # Ensure compatible pixel format for encoder
         if vf_filters:
+            if "lib" in video_encoder:
+                # Software encoders need yuv420p
+                vf_filters.append("format=yuv420p")
+            elif any(hw in video_encoder for hw in ["nvenc", "qsv", "amf", "vaapi"]):
+                # Hardware encoders need nv12
+                vf_filters.append("format=nv12")
             cmd.extend(["-vf", ",".join(vf_filters)])
-        
+
         # Video bitrate with maxrate/bufsize for consistent streaming
         bitrate = self._get_bitrate(output_config.resolution, output_config.bitrate)
         if bitrate and video_encoder != "copy":
@@ -383,17 +387,21 @@ class CommandBuilder:
             cmd.extend(["-pass", str(pass_num)])
             if passlog_prefix:
                 cmd.extend(["-passlogfile", passlog_prefix])
-        
+
         # Build and apply video filters
         vf_filters = self.filter_builder.build_video_filters(
             media_info, output_config, video_encoder
         )
-        # Ensure compatible pixel format for software encoders
-        if vf_filters and "lib" in video_encoder:
-            vf_filters.append("format=yuv420p")
+        # Ensure compatible pixel format for encoder
         if vf_filters:
+            if "lib" in video_encoder:
+                # Software encoders need yuv420p
+                vf_filters.append("format=yuv420p")
+            elif any(hw in video_encoder for hw in ["nvenc", "qsv", "amf", "vaapi"]):
+                # Hardware encoders need nv12
+                vf_filters.append("format=nv12")
             cmd.extend(["-vf", ",".join(vf_filters)])
-        
+
         # Video bitrate
         bitrate = self._get_bitrate(output_config.resolution, output_config.bitrate)
         if bitrate and video_encoder != "copy":
@@ -535,49 +543,72 @@ class CommandBuilder:
         
         map_args = []
         stream_maps = []
-        
+
         # Determine if using hardware encoder
-        is_hw = "nvenc" in video_encoder or "qsv" in video_encoder or "vaapi" in video_encoder
-        
-        # Track audio stream index for var_stream_map
-        audio_stream_idx = 0
-        
-        for i, variant in enumerate(variants):
-            # Map video output from filter_complex
+        is_hw = "nvenc" in video_encoder or "qsv" in video_encoder or "vaapi" in video_encoder or "amf" in video_encoder
+
+        # Map all video outputs from filter_complex first
+        for i in range(len(variants)):
             map_args.extend(["-map", f"[v{i}]"])
-            
-            # Map audio for this variant (each variant gets its own audio mapping)
-            # This avoids "Same elementary stream found more than once" error
-            map_args.extend(["-map", "0:a:0?"])
-            
-            # Video encoding for this variant
+
+        # Map audio ONCE - all variants will share this single audio stream
+        map_args.extend(["-map", "0:a:0?"])
+
+        # Add encoder-global quality settings (applied once, not per-stream)
+        # These options don't support stream specifiers in FFmpeg
+        if "nvenc" in video_encoder:
+            # NVENC global options
+            map_args.extend([
+                "-preset", "p4",
+                "-tune", "hq",
+                "-rc", "vbr",
+                "-multipass", "qres",
+                "-spatial-aq", "1",
+                "-temporal-aq", "1",
+                "-aq-strength", "8",
+                "-rc-lookahead", "32",
+                "-bf", "3",
+                "-b_ref_mode", "middle",
+            ])
+        elif "qsv" in video_encoder:
+            # QSV global options
+            map_args.extend([
+                "-preset", "medium",
+                "-look_ahead", "1",
+                "-look_ahead_depth", "40",
+            ])
+        elif "amf" in video_encoder:
+            # AMF global options
+            map_args.extend([
+                "-quality", "quality",
+                "-rc", "vbr_latency",
+                "-vbaq", "1",
+            ])
+        elif "libx264" in video_encoder:
+            # x264 global options
+            map_args.extend([
+                "-preset", "medium",
+                "-tune", "film",
+                "-profile:v", "high",
+            ])
+        elif "libx265" in video_encoder:
+            map_args.extend(["-preset", "medium"])
+
+        # Per-variant settings (these options support stream specifiers)
+        for i, variant in enumerate(variants):
+            # Video codec for this variant
             map_args.extend([f"-c:v:{i}", video_encoder])
+
+            # Bitrate settings (per-stream)
             map_args.extend([f"-b:v:{i}", variant.video_bitrate])
-            
+
             # Netflix-level rate control: maxrate slightly above target for headroom
             value, unit = self._parse_bitrate(variant.video_bitrate)
             maxrate = f"{value * 1.1:.1f}{unit}"  # 10% headroom
             map_args.extend([f"-maxrate:v:{i}", maxrate])
             map_args.extend([f"-bufsize:v:{i}", self._get_bufsize(variant.video_bitrate, is_hw)])
-            
-            # Quality tuning based on encoder type
-            if "nvenc" in video_encoder:
-                # NVENC quality optimization
-                nvenc_args = self._get_nvenc_quality_args(variant.hw_preset, variant.height)
-                for j in range(0, len(nvenc_args), 2):
-                    if j + 1 < len(nvenc_args):
-                        map_args.extend([f"{nvenc_args[j]}:v:{i}", nvenc_args[j + 1]])
-            elif "libx264" in video_encoder:
-                # x264 quality optimization
-                x264_args = self._get_x264_quality_args(variant.height)
-                for j in range(0, len(x264_args), 2):
-                    if j + 1 < len(x264_args):
-                        map_args.extend([f"{x264_args[j]}:v:{i}", x264_args[j + 1]])
-            elif "libx265" in video_encoder:
-                map_args.extend([f"-preset:v:{i}", "medium"])
-                map_args.extend([f"-x265-params:v:{i}", "aq-mode=2:rc-lookahead=20"])
-            
-            # GOP/Keyframe alignment for proper ABR switching
+
+            # GOP/Keyframe alignment for proper ABR switching (per-stream)
             fps = media_info.fps if media_info.fps > 0 else 30
             gop = int(fps * GOP_SECONDS)  # Use configured GOP seconds
             map_args.extend([
@@ -586,14 +617,14 @@ class CommandBuilder:
                 f"-sc_threshold:v:{i}", "0",  # Disable scene detection for consistent GOPs
                 f"-flags:v:{i}", "+cgop",     # Closed GOP for better seeking
             ])
-            
-            # Audio encoding for this variant
-            map_args.extend([f"-c:a:{i}", audio_encoder])
-            if audio_encoder != "copy":
-                map_args.extend([f"-b:a:{i}", "128k", f"-ac:{i}", "2"])
-            
-            # Build var_stream_map entry: v:i,a:i (video stream i, audio stream i)
-            stream_maps.append(f"v:{i},a:{i}")
+
+            # Build var_stream_map entry: v:i,a:0 (all video variants share audio stream 0)
+            stream_maps.append(f"v:{i},a:0")
+
+        # Audio encoding (single stream shared by all variants)
+        map_args.extend(["-c:a:0", audio_encoder])
+        if audio_encoder != "copy":
+            map_args.extend(["-b:a:0", "128k", "-ac:0", "2"])
         
         # Map subtitle streams if present
         if subtitle_files:

@@ -31,7 +31,8 @@ class HWAccelCapability:
     encoders: List[str] = field(default_factory=list)
     decoders: List[str] = field(default_factory=list)
     gpu_info: Optional[GPUInfo] = None
-    
+    device_path: Optional[str] = None  # For VAAPI: discovered render device path
+
     def to_dict(self) -> Dict[str, Any]:
         result = {
             "type": self.type.value,
@@ -41,6 +42,8 @@ class HWAccelCapability:
         }
         if self.gpu_info:
             result["gpu_info"] = asdict(self.gpu_info)
+        if self.device_path:
+            result["device_path"] = self.device_path
         return result
 
 
@@ -66,16 +69,40 @@ class Capabilities:
         }
     
     def get_best_hw_accel(self) -> HWAccelType:
-        """Return the best available hardware acceleration."""
-        priority = [
-            HWAccelType.NVENC,
-            HWAccelType.QSV,
-            HWAccelType.VIDEOTOOLBOX,
-            HWAccelType.VAAPI,
-            HWAccelType.AMF,
-        ]
-        for accel_type in priority:
-            for hw in self.hw_accels:
-                if hw.type == accel_type and hw.available:
-                    return accel_type
+        """Return the best available hardware acceleration based on detected hardware."""
+        import platform as plat
+
+        # Get available acceleration types
+        available_types = {hw.type for hw in self.hw_accels if hw.available}
+
+        if not available_types:
+            return HWAccelType.SOFTWARE
+
+        system = plat.system()
+
+        if system == "Darwin":
+            # macOS: VideoToolbox is the only option
+            if HWAccelType.VIDEOTOOLBOX in available_types:
+                return HWAccelType.VIDEOTOOLBOX
+
+        elif system == "Windows":
+            # Windows: Prefer vendor of detected GPU
+            # NVENC > AMF > QSV (discrete GPUs typically faster than iGPU)
+            if HWAccelType.NVENC in available_types:
+                return HWAccelType.NVENC
+            if HWAccelType.AMF in available_types:
+                return HWAccelType.AMF
+            if HWAccelType.QSV in available_types:
+                return HWAccelType.QSV
+
+        else:  # Linux
+            # Linux: NVENC > VAAPI > QSV
+            # VAAPI works for both AMD and Intel on Linux
+            if HWAccelType.NVENC in available_types:
+                return HWAccelType.NVENC
+            if HWAccelType.VAAPI in available_types:
+                return HWAccelType.VAAPI
+            if HWAccelType.QSV in available_types:
+                return HWAccelType.QSV
+
         return HWAccelType.SOFTWARE

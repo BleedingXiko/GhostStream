@@ -4,13 +4,104 @@ Handles hardware acceleration detection and fallback.
 """
 
 import logging
-from typing import List, Tuple
+import time
+from typing import Dict, List, Optional, Tuple
 
 from ..models import VideoCodec, AudioCodec, HWAccel
 from ..hardware import HWAccelType, Capabilities
 from ..config import HardwareConfig
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# ENCODER QUALITY SETTINGS
+# =============================================================================
+# These settings prevent artifacts and ensure high-quality encoding
+
+# NVENC quality tuning - prevents blocking, banding, and scene change artifacts
+NVENC_QUALITY_ARGS = {
+    "p4": [  # Balanced quality/speed (default)
+        "-preset", "p4",
+        "-tune", "hq",
+        "-rc", "vbr",
+        "-multipass", "qres",
+        "-spatial-aq", "1",
+        "-temporal-aq", "1",
+        "-aq-strength", "8",
+        "-rc-lookahead", "32",
+        "-bf", "3",
+        "-b_ref_mode", "middle",
+    ],
+    "p5": [  # Quality priority
+        "-preset", "p5",
+        "-tune", "hq",
+        "-rc", "vbr",
+        "-multipass", "qres",
+        "-spatial-aq", "1",
+        "-temporal-aq", "1",
+        "-aq-strength", "10",
+        "-rc-lookahead", "32",
+        "-bf", "4",
+        "-b_ref_mode", "middle",
+    ],
+    "p6": [  # Speed priority (low res)
+        "-preset", "p6",
+        "-tune", "ll",
+        "-rc", "vbr",
+        "-spatial-aq", "1",
+        "-aq-strength", "8",
+        "-bf", "0",
+    ],
+}
+
+# QSV quality tuning - Intel QuickSync
+QSV_QUALITY_ARGS = {
+    "medium": [
+        "-preset", "medium",
+        "-look_ahead", "1",
+        "-look_ahead_depth", "40",
+        "-extbrc", "1",
+        "-b_strategy", "1",
+        "-bf", "3",
+    ],
+    "fast": [
+        "-preset", "fast",
+        "-look_ahead", "1",
+        "-look_ahead_depth", "20",
+        "-bf", "2",
+    ],
+    "slow": [
+        "-preset", "slow",
+        "-look_ahead", "1",
+        "-look_ahead_depth", "60",
+        "-extbrc", "1",
+        "-b_strategy", "1",
+        "-bf", "4",
+    ],
+}
+
+# AMF quality tuning - AMD
+AMF_QUALITY_ARGS = [
+    "-quality", "quality",
+    "-rc", "vbr_latency",
+    "-enforce_hrd", "1",
+    "-vbaq", "1",
+    "-preanalysis", "1",
+    "-bf", "3",
+]
+
+# VAAPI quality tuning
+VAAPI_QUALITY_ARGS = [
+    "-rc_mode", "VBR",
+    "-bf", "3",
+]
+
+# VideoToolbox quality tuning - Apple
+VIDEOTOOLBOX_QUALITY_ARGS = [
+    "-realtime", "0",
+    "-allow_sw", "0",
+]
 
 
 class EncoderSelector:
@@ -20,6 +111,9 @@ class EncoderSelector:
         self.capabilities = capabilities
         self.hw_config = hw_config
         self._failed_encoders: set = set()  # Track encoders that have failed
+        self._failure_counts: Dict[str, int] = {}  # Track failure count per encoder
+        self._last_failure_time: Dict[str, float] = {}  # Track when failure occurred
+        self._cooldown_seconds = 300  # 5 minute cooldown before retry
     
     def get_video_encoder(
         self,
@@ -71,38 +165,57 @@ class EncoderSelector:
         return encoder, extra_args
     
     def _get_encoder_map(self, codec: VideoCodec) -> dict:
-        """Get encoder mapping for a specific codec."""
+        """Get encoder mapping for a specific codec with full quality args."""
         config = self.hw_config
-        
+
+        # Get quality args for each encoder type
+        nvenc_args = NVENC_QUALITY_ARGS.get(config.nvenc_preset, NVENC_QUALITY_ARGS["p4"])
+        qsv_args = QSV_QUALITY_ARGS.get(config.qsv_preset, QSV_QUALITY_ARGS["medium"])
+
         if codec == VideoCodec.H264:
             return {
-                HWAccelType.NVENC: ("h264_nvenc", ["-preset", config.nvenc_preset]),
-                HWAccelType.QSV: ("h264_qsv", ["-preset", config.qsv_preset]),
-                HWAccelType.VAAPI: ("h264_vaapi", []),
-                HWAccelType.VIDEOTOOLBOX: ("h264_videotoolbox", []),
-                HWAccelType.AMF: ("h264_amf", []),
-                HWAccelType.SOFTWARE: ("libx264", ["-preset", "medium", "-crf", "23"]),
+                HWAccelType.NVENC: ("h264_nvenc", nvenc_args.copy()),
+                HWAccelType.QSV: ("h264_qsv", qsv_args.copy()),
+                HWAccelType.VAAPI: ("h264_vaapi", VAAPI_QUALITY_ARGS.copy()),
+                HWAccelType.VIDEOTOOLBOX: ("h264_videotoolbox", VIDEOTOOLBOX_QUALITY_ARGS.copy()),
+                HWAccelType.AMF: ("h264_amf", AMF_QUALITY_ARGS.copy()),
+                HWAccelType.SOFTWARE: ("libx264", [
+                    "-preset", "medium",
+                    "-tune", "film",
+                    "-profile:v", "high",
+                    "-rc-lookahead", "40",
+                    "-bf", "3",
+                    "-aq-mode", "2",
+                ]),
             }
         elif codec == VideoCodec.H265:
             return {
-                HWAccelType.NVENC: ("hevc_nvenc", ["-preset", config.nvenc_preset]),
-                HWAccelType.QSV: ("hevc_qsv", ["-preset", config.qsv_preset]),
-                HWAccelType.VAAPI: ("hevc_vaapi", []),
-                HWAccelType.VIDEOTOOLBOX: ("hevc_videotoolbox", []),
-                HWAccelType.AMF: ("hevc_amf", []),
-                HWAccelType.SOFTWARE: ("libx265", ["-preset", "medium", "-crf", "28"]),
+                HWAccelType.NVENC: ("hevc_nvenc", nvenc_args.copy()),
+                HWAccelType.QSV: ("hevc_qsv", qsv_args.copy()),
+                HWAccelType.VAAPI: ("hevc_vaapi", VAAPI_QUALITY_ARGS.copy()),
+                HWAccelType.VIDEOTOOLBOX: ("hevc_videotoolbox", VIDEOTOOLBOX_QUALITY_ARGS.copy()),
+                HWAccelType.AMF: ("hevc_amf", AMF_QUALITY_ARGS.copy()),
+                HWAccelType.SOFTWARE: ("libx265", [
+                    "-preset", "medium",
+                    "-x265-params", "aq-mode=2:rc-lookahead=20",
+                ]),
             }
         elif codec == VideoCodec.VP9:
             return {
-                HWAccelType.VAAPI: ("vp9_vaapi", []),
-                HWAccelType.QSV: ("vp9_qsv", []),
-                HWAccelType.SOFTWARE: ("libvpx-vp9", ["-cpu-used", "4", "-crf", "30", "-b:v", "0"]),
+                HWAccelType.VAAPI: ("vp9_vaapi", VAAPI_QUALITY_ARGS.copy()),
+                HWAccelType.QSV: ("vp9_qsv", qsv_args.copy()),
+                HWAccelType.SOFTWARE: ("libvpx-vp9", [
+                    "-cpu-used", "4",
+                    "-crf", "30",
+                    "-b:v", "0",
+                    "-row-mt", "1",
+                ]),
             }
         elif codec == VideoCodec.AV1:
             return {
-                HWAccelType.NVENC: ("av1_nvenc", ["-preset", config.nvenc_preset]),
-                HWAccelType.QSV: ("av1_qsv", ["-preset", config.qsv_preset]),
-                HWAccelType.VAAPI: ("av1_vaapi", []),
+                HWAccelType.NVENC: ("av1_nvenc", nvenc_args.copy()),
+                HWAccelType.QSV: ("av1_qsv", qsv_args.copy()),
+                HWAccelType.VAAPI: ("av1_vaapi", VAAPI_QUALITY_ARGS.copy()),
                 HWAccelType.SOFTWARE: ("libsvtav1", ["-preset", "6", "-crf", "30"]),
             }
         else:
@@ -181,24 +294,72 @@ class EncoderSelector:
         error_lower = error_msg.lower()
         return any(err in error_lower for err in hw_errors)
     
-    def mark_hw_failed(self, encoder: str) -> None:
+    def mark_hw_failed(self, encoder: str, job_id: Optional[str] = None) -> None:
         """
-        Mark a hardware encoder as failed.
-        
-        This prevents the encoder from being selected again until reset.
-        Also updates the capabilities to reflect the failure.
+        Mark a hardware encoder as failed with cooldown-based recovery.
+
+        Uses exponential backoff instead of permanently disabling.
+        Only disables globally after multiple consecutive failures.
         """
-        self._failed_encoders.add(encoder)
-        logger.warning(f"[Encoder] Marked encoder as failed: {encoder}")
-        
-        # Update capabilities to mark the corresponding hw accel as unavailable
+        self._failure_counts[encoder] = self._failure_counts.get(encoder, 0) + 1
+        self._last_failure_time[encoder] = time.time()
+
+        failures = self._failure_counts[encoder]
+        logger.warning(f"[Encoder] Encoder {encoder} failed (count: {failures})")
+
+        # Only disable globally after multiple consecutive failures (3+)
+        if failures >= 3:
+            self._failed_encoders.add(encoder)
+            hw_type = self._encoder_to_hw_type(encoder)
+            if hw_type:
+                for hw in self.capabilities.hw_accels:
+                    if hw.type == hw_type:
+                        hw.available = False
+                        logger.warning(f"[Encoder] Disabled {hw_type.value} after {failures} failures")
+                        break
+
+    def is_encoder_available(self, encoder: str) -> bool:
+        """Check if encoder is available (considering cooldown)."""
+        if encoder not in self._failed_encoders:
+            return True
+
+        # Check if cooldown has passed
+        last_failure = self._last_failure_time.get(encoder, 0)
+        failures = self._failure_counts.get(encoder, 0)
+
+        # Exponential backoff: 5 min, 10 min, 20 min, 40 min, etc.
+        cooldown = self._cooldown_seconds * (2 ** (failures - 3))  # Start at 5 min after 3 failures
+        cooldown = min(cooldown, 3600)  # Cap at 1 hour
+
+        if time.time() - last_failure > cooldown:
+            # Reset and allow retry
+            self._failed_encoders.discard(encoder)
+            logger.info(f"[Encoder] Re-enabling {encoder} after {cooldown}s cooldown")
+
+            # Re-enable hw accel capability
+            hw_type = self._encoder_to_hw_type(encoder)
+            if hw_type:
+                for hw in self.capabilities.hw_accels:
+                    if hw.type == hw_type:
+                        hw.available = True
+                        break
+            return True
+
+        return False
+
+    def reset_encoder(self, encoder: str) -> None:
+        """Reset failure state for a specific encoder (e.g., after successful encode)."""
+        self._failed_encoders.discard(encoder)
+        self._failure_counts.pop(encoder, None)
+        self._last_failure_time.pop(encoder, None)
+
         hw_type = self._encoder_to_hw_type(encoder)
         if hw_type:
             for hw in self.capabilities.hw_accels:
                 if hw.type == hw_type:
-                    hw.available = False
-                    logger.info(f"[Encoder] Disabled {hw_type.value} hardware acceleration")
+                    hw.available = True
                     break
+        logger.debug(f"[Encoder] Reset failure state for {encoder}")
     
     def _encoder_to_hw_type(self, encoder: str) -> HWAccelType | None:
         """Map encoder name to hardware acceleration type."""
