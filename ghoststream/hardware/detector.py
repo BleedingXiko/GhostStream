@@ -198,11 +198,14 @@ class HardwareDetector:
                 self.ffmpeg_path, "-hide_banner", "-init_hw_device", "qsv=qsv",
                 "-f", "lavfi", "-i", "nullsrc=s=256x256:d=1", "-frames:v", "1",
                 "-c:v", "h264_qsv", "-f", "null", "-"
-            ])
-            
-            if code == 0 or "Error" not in stderr:
+            ], timeout=15)
+
+            # Both conditions must be true: exit code 0 AND no errors in stderr
+            if code == 0 and "Error" not in stderr and "error" not in stderr.lower():
                 capability.available = True
                 capability.encoders = qsv_encoders
+            else:
+                logger.debug(f"QSV verification failed: code={code}, stderr={stderr[:200] if stderr else 'empty'}")
         
         decoders = self.get_ffmpeg_decoders()
         qsv_decoders = [d for d in decoders.get("video", []) if "qsv" in d.lower()]
@@ -212,40 +215,95 @@ class HardwareDetector:
         return capability
     
     def detect_vaapi(self) -> HWAccelCapability:
-        """Detect VA-API support (Linux)."""
+        """Detect VA-API support (Linux) with device discovery."""
         capability = HWAccelCapability(type=HWAccelType.VAAPI, available=False)
-        
+
         if platform.system() != "Linux":
             return capability
-        
+
         encoders = self.get_ffmpeg_encoders()
         vaapi_encoders = [e for e in encoders.get("video", []) if "vaapi" in e.lower()]
-        
-        if vaapi_encoders:
-            # Check if VA-API device exists
-            import os
-            if os.path.exists("/dev/dri/renderD128"):
+
+        if not vaapi_encoders:
+            return capability
+
+        # Discover available VAAPI render devices
+        vaapi_devices = self._find_vaapi_devices()
+        if not vaapi_devices:
+            logger.debug("No VAAPI render devices found in /dev/dri/")
+            return capability
+
+        # Test each device until we find one that works
+        for device in vaapi_devices:
+            code, _, stderr = self._run_command([
+                self.ffmpeg_path, "-hide_banner",
+                "-init_hw_device", f"vaapi=va:{device}",
+                "-f", "lavfi", "-i", "nullsrc=s=256x256:d=1",
+                "-frames:v", "1",
+                "-vf", "format=nv12,hwupload",
+                "-c:v", "h264_vaapi", "-f", "null", "-"
+            ], timeout=15)
+
+            if code == 0 and "Error" not in stderr and "error" not in stderr.lower():
                 capability.available = True
                 capability.encoders = vaapi_encoders
-        
+                capability.device_path = device  # Store the working device
+                logger.debug(f"VAAPI working device: {device}")
+                break
+            else:
+                logger.debug(f"VAAPI device {device} failed: code={code}")
+
         decoders = self.get_ffmpeg_decoders()
         vaapi_decoders = [d for d in decoders.get("video", []) if "vaapi" in d.lower()]
         capability.decoders = vaapi_decoders
-        
+
         logger.info(f"VA-API: {'Available' if capability.available else 'Not available'}")
         return capability
+
+    def _find_vaapi_devices(self) -> List[str]:
+        """Find available VA-API render devices."""
+        from pathlib import Path
+
+        devices = []
+        dri_path = Path("/dev/dri")
+
+        if not dri_path.exists():
+            return devices
+
+        # Look for renderD* devices (renderD128, renderD129, etc.)
+        for device in sorted(dri_path.glob("renderD*")):
+            if device.is_char_device():
+                devices.append(str(device))
+
+        return devices
     
     def detect_amd_amf(self) -> HWAccelCapability:
-        """Detect AMD AMF support."""
+        """Detect AMD AMF support with actual device verification."""
         capability = HWAccelCapability(type=HWAccelType.AMF, available=False)
-        
+
+        # AMF is Windows-only
+        if platform.system() != "Windows":
+            logger.debug("AMD AMF only available on Windows")
+            return capability
+
         encoders = self.get_ffmpeg_encoders()
         amf_encoders = [e for e in encoders.get("video", []) if "amf" in e.lower()]
-        
+
         if amf_encoders:
-            capability.available = True
-            capability.encoders = amf_encoders
-        
+            # Verify AMF is actually working by attempting to encode
+            code, _, stderr = self._run_command([
+                self.ffmpeg_path, "-hide_banner",
+                "-f", "lavfi", "-i", "nullsrc=s=256x256:d=1",
+                "-frames:v", "1",
+                "-c:v", "h264_amf", "-f", "null", "-"
+            ], timeout=15)
+
+            if code == 0 and "Error" not in stderr and "error" not in stderr.lower():
+                capability.available = True
+                capability.encoders = amf_encoders
+            else:
+                logger.debug(f"AMF verification failed: code={code}, stderr={stderr[:200] if stderr else 'empty'}")
+
         logger.info(f"AMD AMF: {'Available' if capability.available else 'Not available'}")
         return capability
     

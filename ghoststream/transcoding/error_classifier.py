@@ -25,23 +25,57 @@ class FFmpegError:
 
 # Comprehensive FFmpeg error map for intelligent error handling
 FFMPEG_ERROR_MAP: List[FFmpegError] = [
-    # Hardware errors - trigger fallback to software
+    # === NVIDIA NVENC-specific errors ===
+    FFmpegError("no nvenc capable devices", "hardware", False, "No NVENC capable GPU"),
     FFmpegError("no capable devices found", "hardware", False, "No hardware encoder devices"),
+    FFmpegError("openencodesessionex failed", "hardware", False, "NVENC session init failed"),
+    FFmpegError("encodesessionlimitexceeded", "hardware", False, "NVENC session limit reached"),
+    FFmpegError("nvenc session", "hardware", False, "NVENC session error"),
+    FFmpegError("nvenc error", "hardware", False, "NVENC error"),
+    FFmpegError("nvenc", "hardware", False, "NVENC error"),
+    FFmpegError("cuda error", "hardware", False, "CUDA error"),
+    FFmpegError("cuda_error", "hardware", False, "CUDA error"),
+    FFmpegError("exceeds level limit", "hardware", False, "Resolution exceeds encoder level"),
+
+    # === Intel QuickSync-specific errors ===
+    FFmpegError("mfx_err_device_failed", "hardware", False, "Intel QSV device failed"),
+    FFmpegError("mfx_err_unsupported", "hardware", False, "Intel QSV unsupported operation"),
+    FFmpegError("mfx_err", "hardware", False, "Intel QSV error"),
+    FFmpegError("qsv init failed", "hardware", False, "Intel QSV initialization failed"),
+    FFmpegError("qsv", "hardware", False, "QuickSync error"),
+
+    # === AMD AMF-specific errors ===
+    FFmpegError("amf device", "hardware", False, "AMD AMF device error"),
+    FFmpegError("amf error", "hardware", False, "AMD AMF error"),
+    FFmpegError("amf failed", "hardware", False, "AMD AMF operation failed"),
+    FFmpegError("amf", "hardware", False, "AMF error"),
+    FFmpegError("d3d11 device", "hardware", False, "DirectX 11 device error"),
+    FFmpegError("d3d11va", "hardware", False, "DirectX 11 VA error"),
+
+    # === VAAPI-specific errors ===
+    FFmpegError("vaapi surface", "hardware", False, "VAAPI surface allocation failed"),
+    FFmpegError("vaapi encode", "hardware", False, "VAAPI encode error"),
+    FFmpegError("vaapi", "hardware", False, "VAAPI error"),
+    FFmpegError("/dev/dri", "hardware", False, "DRI device error"),
+
+    # === VideoToolbox-specific errors ===
+    FFmpegError("videotoolbox error", "hardware", False, "VideoToolbox error"),
+    FFmpegError("vt_session", "hardware", False, "VideoToolbox session error"),
+    FFmpegError("videotoolbox", "hardware", False, "VideoToolbox error"),
+
+    # === Generic hardware errors ===
     FFmpegError("cannot open", "hardware", False, "Cannot open hardware device"),
     FFmpegError("initialization failed", "hardware", False, "Hardware init failed"),
     FFmpegError("hw_frames_ctx", "hardware", False, "Hardware frame context error"),
     FFmpegError("hwaccel", "hardware", False, "Hardware acceleration error"),
-    FFmpegError("cuda error", "hardware", False, "CUDA error"),
-    FFmpegError("nvenc", "hardware", False, "NVENC error"),
-    FFmpegError("qsv", "hardware", False, "QuickSync error"),
-    FFmpegError("vaapi", "hardware", False, "VAAPI error"),
-    FFmpegError("videotoolbox", "hardware", False, "VideoToolbox error"),
-    FFmpegError("amf", "hardware", False, "AMF error"),
+    FFmpegError("hwupload", "hardware", False, "Hardware upload failed"),
+    FFmpegError("hwdownload", "hardware", False, "Hardware download failed"),
     FFmpegError("gpu", "hardware", False, "GPU error"),
     FFmpegError("device", "hardware", False, "Device error"),
     FFmpegError("driver", "hardware", False, "Driver error"),
-    FFmpegError("exceeds level limit", "hardware", False, "Encoding level exceeded"),
-    FFmpegError("encode session", "hardware", False, "NVENC session limit"),
+    FFmpegError("encode session", "hardware", False, "Encoder session limit"),
+    FFmpegError("unsupported property", "hardware", False, "Encoder property unsupported"),
+    FFmpegError("incompatible pixel format", "hardware", False, "Incompatible pixel format for encoder"),
     
     # Transient network errors - retry with backoff
     FFmpegError("connection refused", "transient", True, "Connection refused"),
