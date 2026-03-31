@@ -35,7 +35,7 @@ The launcher creates a virtual environment, installs dependencies, and starts th
 **Python:**
 ```bash
 pip install ghoststream              # SDK only (lightweight)
-pip install ghoststream[server]      # Full server with all dependencies
+pip install ghoststream[server]      # Full server runtime, including Specter prerequisites
 ```
 
 **JavaScript/TypeScript:**

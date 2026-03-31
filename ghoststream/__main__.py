@@ -1,15 +1,17 @@
 """
-Main entry point for GhostStream
+Main entry point for GhostStream — a Specter-owned Python application.
 """
 
 import argparse
+import asyncio
+import signal
 import socket
 import sys
-import uvicorn
 
 from . import __version__
 from .config import load_config, set_config
 from .logging_config import setup_logging
+from .runtime import create_runtime
 
 
 def main():
@@ -25,34 +27,34 @@ Examples:
   python -m ghoststream --detect-hw        # Detect hardware and exit
         """
     )
-    
+
     parser.add_argument(
         "-v", "--version",
         action="version",
         version=f"GhostStream v{__version__}"
     )
-    
+
     parser.add_argument(
         "-c", "--config",
         type=str,
         default=None,
         help="Path to configuration file"
     )
-    
+
     parser.add_argument(
         "--host",
         type=str,
         default=None,
         help="Host to bind to (overrides config)"
     )
-    
+
     parser.add_argument(
         "--port",
         type=int,
         default=None,
         help="Port to bind to (overrides config)"
     )
-    
+
     parser.add_argument(
         "--log-level",
         type=str,
@@ -60,24 +62,24 @@ Examples:
         default=None,
         help="Logging level (overrides config)"
     )
-    
+
     parser.add_argument(
         "--detect-hw",
         action="store_true",
         help="Detect hardware capabilities and exit"
     )
-    
+
     parser.add_argument(
         "--no-mdns",
         action="store_true",
         help="Disable mDNS service advertisement"
     )
-    
+
     args = parser.parse_args()
-    
+
     # Load configuration
     config = load_config(args.config)
-    
+
     # Apply command-line overrides
     if args.host:
         config.server.host = args.host
@@ -87,33 +89,51 @@ Examples:
         config.logging.level = args.log_level
     if args.no_mdns:
         config.mdns.enabled = False
-    
+
     set_config(config)
-    
+
     # Setup logging
     setup_logging()
-    
+
     # Hardware detection mode
     if args.detect_hw:
         detect_hardware()
         return
-    
+
     # Get local IP address
     local_ip = _get_local_ip(config.server.host)
-    
+
     # Print professional startup banner
     _print_startup_banner(config, local_ip)
-    
-    # Uvicorn configuration - use uvloop on Linux for better async performance
-    uvicorn.run(
-        "ghoststream.api:app",
-        host=config.server.host,
-        port=config.server.port,
-        log_level=config.logging.level.lower(),
-        access_log=config.logging.level == "DEBUG",
-        loop="uvloop" if sys.platform != "win32" else "asyncio",
-        timeout_keep_alive=30,
-    )
+
+    # Start the application
+    _serve()
+
+
+def _serve() -> None:
+    """Run the Specter-owned GhostStream application.
+
+    The GhostStreamApplication owns every service — WebSocket, jobs,
+    discovery, registration, and network ingress.  Starting the runtime
+    starts them all in order; stopping it tears them down in reverse.
+    """
+    import gevent
+    import gevent.event
+
+    stop_event = gevent.event.Event()
+
+    def handle_signal():
+        stop_event.set()
+
+    gevent.signal_handler(signal.SIGINT, handle_signal)
+    gevent.signal_handler(signal.SIGTERM, handle_signal)
+
+    runtime = create_runtime()
+    runtime.start()
+    try:
+        stop_event.wait()
+    finally:
+        runtime.stop()
 
 
 def _get_local_ip(configured_host: str) -> str:
@@ -133,7 +153,7 @@ def _get_local_ip(configured_host: str) -> str:
 def _print_startup_banner(config, local_ip: str):
     """Print a professional startup banner with key information."""
     from .hardware import HardwareDetector
-    
+
     # Detect hardware for display
     try:
         detector = HardwareDetector(config.transcoding.ffmpeg_path)
@@ -143,9 +163,9 @@ def _print_startup_banner(config, local_ip: str):
     except Exception:
         hw_accel = "NONE"
         ffmpeg_ver = "Unknown"
-    
+
     width = 62
-    
+
     print("\n" + "═" * width)
     print("   _____ _               _   _____ _                          ")
     print("  / ____| |             | | / ____| |                         ")
@@ -180,44 +200,44 @@ def detect_hardware():
     """Detect and print hardware capabilities."""
     from .hardware import HardwareDetector
     from .config import get_config
-    
+
     config = get_config()
-    
+
     print("\n=== GhostStream Hardware Detection ===\n")
-    
+
     try:
         detector = HardwareDetector(config.transcoding.ffmpeg_path)
         capabilities = detector.detect_all(config.transcoding.max_concurrent_jobs)
-        
+
         print(f"Platform: {capabilities.platform}")
         print(f"FFmpeg Version: {capabilities.ffmpeg_version}")
         print()
-        
+
         print("Hardware Acceleration:")
         print("-" * 40)
-        
+
         for hw in capabilities.hw_accels:
             status = "[OK] Available" if hw.available else "[--] Not available"
             print(f"  {hw.type.value.upper():15} {status}")
-            
+
             if hw.available and hw.encoders:
                 print(f"    Encoders: {', '.join(hw.encoders[:5])}")
-            
+
             if hw.gpu_info:
                 print(f"    GPU: {hw.gpu_info.name}")
                 print(f"    Memory: {hw.gpu_info.memory_mb} MB")
-        
+
         print()
         print("Supported Video Codecs:")
         print(f"  {', '.join(capabilities.video_codecs)}")
-        
+
         print()
         print("Supported Audio Codecs:")
         print(f"  {', '.join(capabilities.audio_codecs)}")
-        
+
         print()
         print(f"Best Hardware Acceleration: {capabilities.get_best_hw_accel().value}")
-        
+
     except Exception as e:
         print(f"Error detecting hardware: {e}")
         sys.exit(1)

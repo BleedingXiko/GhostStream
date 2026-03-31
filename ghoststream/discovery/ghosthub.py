@@ -1,15 +1,16 @@
 """
-GhostHub registration for GhostStream
+GhostHub registration for GhostStream (gevent-native)
 """
 
 import socket
 import logging
-import asyncio
+import gevent
 import os
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from ..config import get_config
 from ..hardware import get_capabilities
+from ..security import RegistrationAuthService
 
 logger = logging.getLogger(__name__)
 
@@ -17,9 +18,17 @@ logger = logging.getLogger(__name__)
 class GhostHubRegistration:
     """Handles push registration with GhostHub server."""
     
-    def __init__(self, ghosthub_url: str, port: int = 8765):
+    def __init__(
+        self,
+        ghosthub_url: str,
+        port: int = 8765,
+        callback_url: Optional[str] = None,
+        auth_service: Optional[RegistrationAuthService] = None,
+    ):
         self.ghosthub_url = ghosthub_url.rstrip("/")
         self.port = port
+        self.callback_url = callback_url
+        self.auth_service = auth_service
         self._stop_event = False
         self._registration_task = None
     
@@ -48,6 +57,7 @@ class GhostHubRegistration:
         
         return {
             "address": f"{local_ip}:{self.port}",
+            "callback_url": self.callback_url or f"http://{local_ip}:{self.port}",
             "name": get_config().mdns.service_name,
             "version": __version__,
             "hw_accels": hw_accels,
@@ -66,11 +76,15 @@ class GhostHubRegistration:
         
         try:
             payload = self._get_registration_payload()
+            headers = {}
+            if self.auth_service:
+                payload = self.auth_service.sign_payload(payload)
+                headers = self.auth_service.build_headers(payload)
             logger.info(f"[GhostHub] Registering at {register_url} with payload: {payload}")
             
             # Longer timeout for slow networks
             with httpx.Client(timeout=15.0) as client:
-                resp = client.post(register_url, json=payload)
+                resp = client.post(register_url, json=payload, headers=headers)
                 
                 if resp.status_code == 200:
                     data = resp.json()
@@ -93,14 +107,14 @@ class GhostHubRegistration:
                 logger.warning(f"[GhostHub] Registration error: {e}")            
             return False
     
-    async def start_periodic_registration(self, interval_seconds: int = 300) -> None:
+    def start_periodic_registration(self, interval_seconds: int = 300) -> None:
         """Start periodic re-registration with GhostHub."""
         self._stop_event = False
         ghosthub_url = os.environ.get('GHOSTHUB_URL', self.ghosthub_url)
         
         # Try registration once on startup
         logger.info(f"[GhostHub] Attempting to register with GhostHub at {ghosthub_url}")
-        success = await asyncio.get_event_loop().run_in_executor(None, self.register)
+        success = self.register()
         
         if success:
             logger.info(f"[GhostHub] ✓ Registered successfully with GhostHub")
@@ -108,15 +122,15 @@ class GhostHubRegistration:
             # Single clear message instead of retry spam
             logger.warning(f"[GhostHub] ✗ Could not register with GhostHub at {ghosthub_url}")
             logger.warning(f"[GhostHub]   This is OK - GhostHub can still find this server via manual add.")
-            logger.warning(f"[GhostHub]   To fix: ensure GhostStream is on same network as GhostHub,")
+            logger.warning(f"[GhostHub]   To fix: ensure GhostStream on same network as GhostHub,")
             logger.warning(f"[GhostHub]   or set GHOSTHUB_URL environment variable to correct address.")
         
         # Periodic re-registration (silent - only log on success or after long failure)
         failures = 0
         while not self._stop_event:
-            await asyncio.sleep(interval_seconds)
+            gevent.sleep(interval_seconds)
             if not self._stop_event:
-                if await asyncio.get_event_loop().run_in_executor(None, self.register):
+                if self.register():
                     if failures > 0:
                         logger.info(f"[GhostHub] ✓ Re-registered with GhostHub after {failures} failures")
                     failures = 0

@@ -114,6 +114,7 @@ class TranscodeJob:
     progress: float = 0
     stream_url: Optional[str] = None
     download_url: Optional[str] = None
+    control_token: Optional[str] = None
     error_message: Optional[str] = None
     hw_accel_used: Optional[str] = None
 
@@ -218,6 +219,7 @@ class GhostStreamClient:
         self.browser: Optional[ServiceBrowser] = None
         self._discovery_started = False
         self._callbacks: List[Callable[[str, GhostStreamServer], None]] = []
+        self._control_tokens: Dict[str, str] = {}
         
         # Connection pool - reused across requests
         self._http_client: Optional[httpx.AsyncClient] = None
@@ -236,6 +238,66 @@ class GhostStreamClient:
                 port=int(port)
             )
             self.preferred_server = "manual"
+
+    def _token_key(self, server: GhostStreamServer, job_id: str) -> str:
+        return f"{server.base_url}|{job_id}"
+
+    def _store_control_token(
+        self,
+        server: Optional[GhostStreamServer],
+        job_id: Optional[str],
+        control_token: Optional[str],
+    ) -> None:
+        if not server or not job_id or not control_token:
+            return
+        self._control_tokens[self._token_key(server, job_id)] = control_token
+
+    def _get_control_token(
+        self,
+        server: Optional[GhostStreamServer],
+        job_id: str,
+    ) -> Optional[str]:
+        if not server:
+            return None
+        return self._control_tokens.get(self._token_key(server, job_id))
+
+    def _drop_control_token(
+        self,
+        server: Optional[GhostStreamServer],
+        job_id: str,
+    ) -> None:
+        if not server:
+            return
+        self._control_tokens.pop(self._token_key(server, job_id), None)
+
+    def _drop_server_tokens(self, server: GhostStreamServer) -> None:
+        prefix = f"{server.base_url}|"
+        for key in [key for key in self._control_tokens if key.startswith(prefix)]:
+            self._control_tokens.pop(key, None)
+
+    def _auth_headers(self, server: Optional[GhostStreamServer], job_id: str) -> Dict[str, str]:
+        token = self._get_control_token(server, job_id)
+        if not token:
+            return {}
+        return {"X-GhostStream-Control-Token": token}
+
+    def _job_from_payload(
+        self,
+        data: Dict[str, Any],
+        server: Optional[GhostStreamServer],
+    ) -> TranscodeJob:
+        job = TranscodeJob(
+            job_id=data["job_id"],
+            status=TranscodeStatus(data["status"]),
+            progress=data.get("progress", 0),
+            stream_url=data.get("stream_url"),
+            download_url=data.get("download_url"),
+            control_token=data.get("control_token"),
+            error_message=data.get("error_message"),
+            hw_accel_used=data.get("hw_accel_used"),
+        )
+        self._store_control_token(server, job.job_id, job.control_token)
+        return job
     
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create the shared HTTP client (connection pooling)."""
@@ -464,14 +526,7 @@ class GhostStreamClient:
             if response.status_code == 200:
                 data = response.json()
                 logger.info(f"[GhostStream] Job created: {data.get('job_id')}")
-                return TranscodeJob(
-                    job_id=data["job_id"],
-                    status=TranscodeStatus(data["status"]),
-                    progress=data.get("progress", 0),
-                    stream_url=data.get("stream_url"),
-                    download_url=data.get("download_url"),
-                    hw_accel_used=data.get("hw_accel_used")
-                )
+                return self._job_from_payload(data, server)
             else:
                 error_text = response.text
                 logger.error(f"[GhostStream] Transcode failed ({response.status_code}): {error_text[:300]}")
@@ -515,20 +570,13 @@ class GhostStreamClient:
         try:
             response = self._request_sync_with_retry(
                 "GET",
-                f"{server.base_url}/api/transcode/{job_id}/status"
+                f"{server.base_url}/api/transcode/{job_id}/status",
+                headers=self._auth_headers(server, job_id),
             )
             
             if response.status_code == 200:
                 data = response.json()
-                return TranscodeJob(
-                    job_id=data["job_id"],
-                    status=TranscodeStatus(data["status"]),
-                    progress=data.get("progress", 0),
-                    stream_url=data.get("stream_url"),
-                    download_url=data.get("download_url"),
-                    error_message=data.get("error_message"),
-                    hw_accel_used=data.get("hw_accel_used")
-                )
+                return self._job_from_payload(data, server)
         except Exception as e:
             logger.error(f"Status request error: {e}")
         
@@ -547,9 +595,13 @@ class GhostStreamClient:
         try:
             response = self._request_sync_with_retry(
                 "POST",
-                f"{server.base_url}/api/transcode/{job_id}/cancel"
+                f"{server.base_url}/api/transcode/{job_id}/cancel",
+                headers=self._auth_headers(server, job_id),
             )
-            return response.status_code == 200
+            success = response.status_code == 200
+            if success:
+                self._drop_control_token(server, job_id)
+            return success
         except Exception as e:
             logger.error(f"Cancel request error: {e}")
         
@@ -568,9 +620,13 @@ class GhostStreamClient:
         try:
             response = self._request_sync_with_retry(
                 "DELETE",
-                f"{server.base_url}/api/transcode/{job_id}"
+                f"{server.base_url}/api/transcode/{job_id}",
+                headers=self._auth_headers(server, job_id),
             )
-            return response.status_code == 200
+            success = response.status_code == 200
+            if success:
+                self._drop_control_token(server, job_id)
+            return success
         except Exception as e:
             logger.error(f"Delete request error: {e}")
         
@@ -719,6 +775,8 @@ class GhostStreamClient:
     def _on_server_removed(self, name: str) -> None:
         """Called when a server is removed."""
         server = self.servers.pop(name, None)
+        if server:
+            self._drop_server_tokens(server)
         
         if self.preferred_server == name:
             # Select another server if available
@@ -899,14 +957,7 @@ class GhostStreamClient:
             if response.status_code == 200:
                 data = response.json()
                 logger.info(f"[GhostStream] Job created: {data.get('job_id')}")
-                return TranscodeJob(
-                    job_id=data["job_id"],
-                    status=TranscodeStatus(data["status"]),
-                    progress=data.get("progress", 0),
-                    stream_url=data.get("stream_url"),
-                    download_url=data.get("download_url"),
-                    hw_accel_used=data.get("hw_accel_used")
-                )
+                return self._job_from_payload(data, server)
             else:
                 error_text = response.text
                 logger.error(f"[GhostStream] Transcode failed ({response.status_code}): {error_text[:300]}")
@@ -950,20 +1001,13 @@ class GhostStreamClient:
         try:
             response = await self._request_with_retry(
                 "GET",
-                f"{server.base_url}/api/transcode/{job_id}/status"
+                f"{server.base_url}/api/transcode/{job_id}/status",
+                headers=self._auth_headers(server, job_id),
             )
             
             if response.status_code == 200:
                 data = response.json()
-                return TranscodeJob(
-                    job_id=data["job_id"],
-                    status=TranscodeStatus(data["status"]),
-                    progress=data.get("progress", 0),
-                    stream_url=data.get("stream_url"),
-                    download_url=data.get("download_url"),
-                    error_message=data.get("error_message"),
-                    hw_accel_used=data.get("hw_accel_used")
-                )
+                return self._job_from_payload(data, server)
         except Exception as e:
             logger.error(f"Status request error: {e}")
         
@@ -982,9 +1026,13 @@ class GhostStreamClient:
         try:
             response = await self._request_with_retry(
                 "POST",
-                f"{server.base_url}/api/transcode/{job_id}/cancel"
+                f"{server.base_url}/api/transcode/{job_id}/cancel",
+                headers=self._auth_headers(server, job_id),
             )
-            return response.status_code == 200
+            success = response.status_code == 200
+            if success:
+                self._drop_control_token(server, job_id)
+            return success
         except Exception as e:
             logger.error(f"Cancel request error: {e}")
         
@@ -1003,9 +1051,13 @@ class GhostStreamClient:
         try:
             response = await self._request_with_retry(
                 "DELETE",
-                f"{server.base_url}/api/transcode/{job_id}"
+                f"{server.base_url}/api/transcode/{job_id}",
+                headers=self._auth_headers(server, job_id),
             )
-            return response.status_code == 200
+            success = response.status_code == 200
+            if success:
+                self._drop_control_token(server, job_id)
+            return success
         except Exception as e:
             logger.error(f"Delete request error: {e}")
         
@@ -1047,13 +1099,19 @@ class GhostStreamClient:
             return
         
         ws_url = f"ws://{server.host}:{server.port}/ws/progress"
+        job_tokens = {
+            job_id: token
+            for job_id in job_ids
+            if (token := self._get_control_token(server, job_id))
+        }
         
         try:
             async with websockets.connect(ws_url) as ws:
                 # Subscribe to jobs
                 subscribe_msg = {
                     "type": "subscribe",
-                    "job_ids": job_ids
+                    "job_ids": job_ids,
+                    "job_tokens": job_tokens,
                 }
                 await ws.send(json.dumps(subscribe_msg))
                 logger.info(f"[GhostStream] Subscribed to progress for {len(job_ids)} jobs")

@@ -101,6 +101,7 @@ class TranscodeResponse(BaseModel):
     status: JobStatus
     progress: float = 0
     stream_url: Optional[str] = None
+    control_token: Optional[str] = None
     download_url: Optional[str] = None
     duration: Optional[float] = None
     eta_seconds: Optional[int] = None
@@ -123,6 +124,7 @@ class JobStatusResponse(BaseModel):
     duration: Optional[float] = None
     stream_url: Optional[str] = None
     download_url: Optional[str] = None
+    control_token: Optional[str] = None
     eta_seconds: Optional[int] = None
     hw_accel_used: Optional[str] = None
     error_message: Optional[str] = None

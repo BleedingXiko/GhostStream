@@ -21,8 +21,9 @@ from fastapi.testclient import TestClient
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from ghoststream.api import app
+from ghoststream.api.app import create_app
 from ghoststream.config import load_config, set_config, get_config
+from ghoststream.runtime import create_runtime
 
 
 # =============================================================================
@@ -227,6 +228,17 @@ def api_client(test_config) -> Generator[TestClient, None, None]:
     Test client for API endpoints.
     Auto-cleanup on teardown.
     """
+    app = create_app()
+    runtime = create_runtime()
+
+    @app.on_event("startup")
+    async def _startup_runtime() -> None:
+        await runtime.start()
+
+    @app.on_event("shutdown")
+    async def _shutdown_runtime() -> None:
+        await runtime.stop()
+
     with TestClient(app) as client:
         yield client
 
@@ -254,7 +266,14 @@ def cleanup_jobs(api_client):
     # Cleanup all tracked jobs
     for job_id in job_ids:
         try:
-            api_client.delete(f"/api/transcode/{job_id}")
+            if isinstance(job_id, tuple):
+                actual_job_id, control_token = job_id
+                api_client.delete(
+                    f"/api/transcode/{actual_job_id}",
+                    headers={"X-GhostStream-Control-Token": control_token},
+                )
+            else:
+                api_client.delete(f"/api/transcode/{job_id}")
         except Exception:
             pass
 

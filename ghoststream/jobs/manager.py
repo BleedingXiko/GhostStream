@@ -1,16 +1,19 @@
 """
-Job queue and management for GhostStream
+Job queue and management for GhostStream — Specter-native (gevent).
 """
 
-import asyncio
 import uuid
 import logging
 import hashlib
+import gevent
+import gevent.queue
+import gevent.lock
 from datetime import datetime
 from typing import Dict, Optional, List, Callable, Any
 from pathlib import Path
 
 from ..models import JobStatus, TranscodeRequest, TranscodeMode
+from ..security import CapabilityService
 from ..transcoding import TranscodeEngine, TranscodeProgress
 from ..config import get_config
 from .models import Job
@@ -22,22 +25,27 @@ logger = logging.getLogger(__name__)
 class JobManager:
     """Manages the job queue and execution with proper lifecycle tracking."""
     
-    def __init__(self, base_url: str = "http://localhost:8765"):
+    def __init__(
+        self,
+        base_url: str = "http://localhost:8765",
+        capability_service: Optional[CapabilityService] = None,
+    ):
         self.config = get_config()
         self.jobs: Dict[str, Job] = {}
-        self.queue: asyncio.Queue = asyncio.Queue()
-        self.active_jobs: Dict[str, asyncio.Task] = {}
+        self.queue: gevent.queue.Queue = gevent.queue.Queue()
+        self.active_jobs: Dict[str, gevent.Greenlet] = {}
         self.engine = TranscodeEngine()
         self.stats = JobStats()
         self.base_url = base_url
+        self.capability_service = capability_service
         self.progress_callbacks: List[Callable[[str, TranscodeProgress], None]] = []
         self.status_callbacks: List[Callable[[str, JobStatus], None]] = []
-        self._workers: List[asyncio.Task] = []
-        self._cleanup_task: Optional[asyncio.Task] = None
+        self._workers: List[gevent.Greenlet] = []
+        self._cleanup_greenlet: Optional[gevent.Greenlet] = None
         self._running = False
         
         # Concurrency control
-        self._create_lock = asyncio.Lock()  # Protects stream creation race conditions
+        self._create_lock = gevent.lock.BoundedSemaphore(1)
         
         # Cleanup settings
         self._cleanup_interval = 300  # 5 minutes
@@ -48,8 +56,58 @@ class JobManager:
         self._shared_streams: Dict[str, str] = {}
         # Track which viewer sessions are using which job
         self._viewer_sessions: Dict[str, str] = {}  # session_id -> job_id
+
+    def issue_control_token(self, job_id: str) -> Optional[str]:
+        if not self.capability_service:
+            return None
+        return self.capability_service.mint(
+            job_id=job_id,
+            scope=CapabilityService.CONTROL_SCOPE,
+        )
+
+    def issue_stream_token(self, job_id: str) -> Optional[str]:
+        if not self.capability_service:
+            return None
+        return self.capability_service.mint(
+            job_id=job_id,
+            scope=CapabilityService.STREAM_SCOPE,
+        )
+
+    def build_stream_url(self, job: Job) -> Optional[str]:
+        if not job.stream_url:
+            return None
+        if not self.capability_service:
+            return job.stream_url
+        return self.capability_service.build_stream_url(
+            job.stream_url,
+            self.issue_stream_token(job.id),
+        )
+
+    def build_download_url(self, job: Job) -> Optional[str]:
+        if not job.download_url:
+            return None
+        if not self.capability_service:
+            return job.download_url
+        return self.capability_service.build_stream_url(
+            job.download_url,
+            self.issue_stream_token(job.id),
+        )
+
+    def build_transcode_response(self, job: Job):
+        return job.to_response(
+            stream_url_override=self.build_stream_url(job),
+            download_url_override=self.build_download_url(job),
+            control_token=self.issue_control_token(job.id),
+        )
+
+    def build_status_response(self, job: Job):
+        return job.to_status_response(
+            stream_url_override=self.build_stream_url(job),
+            download_url_override=self.build_download_url(job),
+            control_token=self.issue_control_token(job.id),
+        )
         
-    async def start(self) -> None:
+    def start(self) -> None:
         """Start the job manager workers and cleanup task."""
         if self._running:
             return
@@ -58,59 +116,55 @@ class JobManager:
         max_workers = self.config.transcoding.max_concurrent_jobs
         
         # Clean up orphaned temp directories on startup
-        await self._cleanup_orphaned_dirs()
+        self._cleanup_orphaned_dirs()
         
         for i in range(max_workers):
-            worker = asyncio.create_task(self._worker(i))
+            worker = gevent.spawn(self._worker, i)
             self._workers.append(worker)
         
         # Start background cleanup task
-        self._cleanup_task = asyncio.create_task(self._cleanup_loop())
+        self._cleanup_greenlet = gevent.spawn(self._cleanup_loop)
         
         logger.info(f"Started {max_workers} job workers + cleanup task")
     
-    async def stop(self) -> None:
+    def stop(self) -> None:
         """Stop the job manager and cancel all workers."""
         self._running = False
         
         # Cancel cleanup task
-        if self._cleanup_task:
-            self._cleanup_task.cancel()
-            try:
-                await self._cleanup_task
-            except asyncio.CancelledError:
-                pass
-            self._cleanup_task = None
+        if self._cleanup_greenlet:
+            self._cleanup_greenlet.kill(block=False)
+            self._cleanup_greenlet = None
         
         # Cancel all active jobs
-        for job_id, task in self.active_jobs.items():
+        for job_id, glet in self.active_jobs.items():
             if job_id in self.jobs:
                 self.jobs[job_id].cancel_event.set()
-            if task:
-                task.cancel()
+            if glet:
+                glet.kill(block=False)
         
         # Cancel workers
         for worker in self._workers:
-            worker.cancel()
+            worker.kill(block=False)
         
-        await asyncio.gather(*self._workers, return_exceptions=True)
+        gevent.joinall(self._workers, timeout=10)
         self._workers.clear()
         
         # Final cleanup of all jobs
-        await self._cleanup_all_jobs()
+        self._cleanup_all_jobs()
         
         logger.info("Job manager stopped")
     
-    async def _worker(self, worker_id: int) -> None:
-        """Worker coroutine that processes jobs from the queue."""
+    def _worker(self, worker_id: int) -> None:
+        """Worker greenlet that processes jobs from the queue."""
         logger.info(f"Worker {worker_id} started")
         
         while self._running:
             try:
-                job_id = await asyncio.wait_for(self.queue.get(), timeout=1.0)
-            except asyncio.TimeoutError:
+                job_id = self.queue.get(timeout=1.0)
+            except gevent.queue.Empty:
                 continue
-            except asyncio.CancelledError:
+            except gevent.GreenletExit:
                 break
             
             if job_id not in self.jobs:
@@ -120,7 +174,7 @@ class JobManager:
             self.active_jobs[job_id] = None  # Track as active
             
             try:
-                await self._process_job(job)
+                self._process_job(job)
             except Exception as e:
                 logger.exception(f"Worker {worker_id} error processing job {job_id}: {e}")
                 job.status = JobStatus.ERROR
@@ -128,27 +182,25 @@ class JobManager:
                 job.completed_at = datetime.utcnow()
                 self._notify_status(job_id, JobStatus.ERROR)
             finally:
-                self.queue.task_done()
                 if job_id in self.active_jobs:
                     del self.active_jobs[job_id]
                 self.stats.record_job_complete(job, job.status == JobStatus.READY)
         
         logger.info(f"Worker {worker_id} stopped")
     
-    async def _process_job(self, job: Job) -> None:
+    def _process_job(self, job: Job) -> None:
         """Process a single job."""
         job.status = JobStatus.PROCESSING
         job.started_at = datetime.utcnow()
         
         # For streaming modes, set stream_url early so clients can start polling
-        # The HLS segments will become available incrementally during transcoding
         if job.request.mode in [TranscodeMode.STREAM, TranscodeMode.ABR]:
             job.stream_url = f"{self.base_url}/stream/{job.id}/master.m3u8"
         
         self._notify_status(job.id, JobStatus.PROCESSING)
         
         # Get media info for duration
-        media_info = await self.engine.get_media_info(job.request.source)
+        media_info = self.engine.get_media_info(job.request.source)
         job.duration = media_info.duration
         
         def progress_callback(progress: TranscodeProgress):
@@ -164,8 +216,7 @@ class JobManager:
         
         # Choose transcoding method based on mode
         if job.request.mode == TranscodeMode.ABR:
-            # Adaptive bitrate streaming
-            success, result, hw_accel = await self.engine.transcode_abr(
+            success, result, hw_accel = self.engine.transcode_abr(
                 job_id=job.id,
                 source=job.request.source,
                 output_config=job.request.output,
@@ -175,8 +226,7 @@ class JobManager:
                 subtitles=job.request.subtitles
             )
         else:
-            # Standard transcoding (stream or batch)
-            success, result, hw_accel = await self.engine.transcode(
+            success, result, hw_accel = self.engine.transcode(
                 job_id=job.id,
                 source=job.request.source,
                 mode=job.request.mode,
@@ -201,7 +251,6 @@ class JobManager:
             job.progress = 100.0
             job.output_path = result
             
-            # Set URLs based on mode
             if job.request.mode == TranscodeMode.STREAM:
                 job.stream_url = f"{self.base_url}/stream/{job.id}/master.m3u8"
             elif job.request.mode == TranscodeMode.ABR:
@@ -211,15 +260,14 @@ class JobManager:
             
             self._notify_status(job.id, JobStatus.READY)
             
-            # Send callback if configured
             if job.request.callback_url:
-                await self._send_callback(job)
+                self._send_callback(job)
         else:
             job.status = JobStatus.ERROR
             job.error_message = result
             self._notify_status(job.id, JobStatus.ERROR)
     
-    async def _send_callback(self, job: Job) -> None:
+    def _send_callback(self, job: Job) -> None:
         """Send callback to the configured URL."""
         if not job.request.callback_url:
             return
@@ -227,11 +275,10 @@ class JobManager:
         import httpx
         
         try:
-            async with httpx.AsyncClient() as client:
-                await client.post(
+            with httpx.Client(timeout=10.0) as client:
+                client.post(
                     job.request.callback_url,
-                    json=job.to_response().model_dump(),
-                    timeout=10.0
+                    json=self.build_transcode_response(job).model_dump(),
                 )
             logger.info(f"Callback sent to {job.request.callback_url}")
         except Exception as e:
@@ -263,15 +310,11 @@ class JobManager:
     
     def _generate_stream_key(self, request: TranscodeRequest) -> str:
         """Generate a unique key for stream sharing based on source and output config."""
-        # Create a hash of source + relevant output config for stream matching
-        # NOTE: start_time is intentionally EXCLUDED to allow joining streams at different positions
-        # The HLS playlist handles seeking - we don't need separate transcodes for different start times
         key_parts = [
-            request.source.rstrip('/'),  # Normalize trailing slashes
+            request.source.rstrip('/'),
             request.mode.value,
             request.output.format.value if request.output else "hls",
             request.output.resolution.value if request.output else "original",
-            # start_time excluded - stream sharing should work regardless of seek position
         ]
         key_string = "|".join(key_parts)
         stream_key = hashlib.sha256(key_string.encode()).hexdigest()[:16]
@@ -280,58 +323,40 @@ class JobManager:
     
     def _is_stream_shareable(self, job: Job) -> bool:
         """Check if a job's stream can be shared with new viewers."""
-        # Only share active HLS/ABR streaming jobs
         if job.request.mode not in [TranscodeMode.STREAM, TranscodeMode.ABR]:
             return False
-        # Must be queued, processing, or ready (not error/cancelled)
         if job.status not in [JobStatus.QUEUED, JobStatus.PROCESSING, JobStatus.READY]:
             return False
-        # Must not be cleaned up or cancelled
         if job.cleaned_up or job.cancel_event.is_set():
             return False
-        # For READY jobs, only share if transcode actually completed (progress >= 99%)
-        # This prevents sharing incomplete transcodes that erroneously marked as ready
         if job.status == JobStatus.READY and job.progress < 99.0:
             logger.warning(f"[StreamShare] Job {job.id} marked READY but progress only {job.progress}% - not shareable")
             return False
         return True
     
-    async def create_job(self, request: TranscodeRequest, session_id: Optional[str] = None) -> Job:
+    def create_job(self, request: TranscodeRequest, session_id: Optional[str] = None) -> Job:
         """
         Create a new transcoding job or return existing shared stream.
         
-        For HLS streaming requests, checks if an identical stream already exists
-        and returns that instead of creating a duplicate transcoding job.
-        
-        Args:
-            request: The transcode request
-            session_id: Optional viewer session ID for tracking
-            
-        Returns:
-            Job instance (either new or existing shared stream)
+        Thread-safe via gevent BoundedSemaphore.
         """
-        async with self._create_lock:
+        with self._create_lock:
             # Check for stream sharing on HLS/ABR streaming requests
             if request.mode in [TranscodeMode.STREAM, TranscodeMode.ABR]:
                 stream_key = self._generate_stream_key(request)
                 
-                # Check if we have an existing shared stream for this source
                 if stream_key in self._shared_streams:
                     existing_job_id = self._shared_streams[stream_key]
                     existing_job = self.jobs.get(existing_job_id)
                     
                     if existing_job and self._is_stream_shareable(existing_job):
-                        # Check if this is a NEW viewer or same session requesting again
                         is_new_viewer = True
                         if session_id:
-                            # Check if this session already has this job
                             if self._viewer_sessions.get(session_id) == existing_job_id:
-                                is_new_viewer = False  # Same session, don't increment
+                                is_new_viewer = False
                             else:
-                                # New session joining - track it
                                 self._viewer_sessions[session_id] = existing_job_id
                         
-                        # Only increment viewer count for genuinely new viewers
                         if is_new_viewer:
                             existing_job.viewer_count += 1
                             existing_job.is_shared = existing_job.viewer_count > 1
@@ -343,7 +368,6 @@ class JobManager:
                         existing_job.last_accessed = datetime.utcnow()
                         return existing_job
                     else:
-                        # Stream no longer valid, remove from tracking and log why
                         if existing_job:
                             logger.info(
                                 f"[StreamShare] Existing job {existing_job_id} not shareable: "
@@ -357,22 +381,17 @@ class JobManager:
                 else:
                     logger.debug(f"[StreamShare] No existing stream for key {stream_key}, creating new")
                 
-                # Create new job with stream sharing enabled
                 job_id = str(uuid.uuid4())
                 job = Job(id=job_id, request=request, stream_key=stream_key, viewer_count=1)
-                
-                # Set stream_url IMMEDIATELY so clients can start trying to load
-                # The proxy will wait for the manifest to be ready
                 job.stream_url = f"{self.base_url}/stream/{job_id}/master.m3u8"
                 
                 self.jobs[job_id] = job
                 self._shared_streams[stream_key] = job_id
                 
-                # Track session if provided
                 if session_id:
                     self._viewer_sessions[session_id] = job_id
                 
-                await self.queue.put(job_id)
+                self.queue.put(job_id)
                 
                 logger.info(f"[StreamShare] Created new shared stream {job_id} for source: {request.source[:50]}...")
                 return job
@@ -381,48 +400,31 @@ class JobManager:
             job_id = str(uuid.uuid4())
             job = Job(id=job_id, request=request)
             
-            # For STREAM mode without sharing, still set stream_url immediately
             if request.mode == TranscodeMode.STREAM:
                 job.stream_url = f"{self.base_url}/stream/{job_id}/master.m3u8"
             
             self.jobs[job_id] = job
-            await self.queue.put(job_id)
+            self.queue.put(job_id)
             
             logger.info(f"Created job {job_id} for source: {request.source}")
             return job
     
-    async def leave_stream(self, job_id: str, session_id: Optional[str] = None) -> bool:
-        """
-        Decrement viewer count when a viewer leaves a shared stream.
-        
-        Uses _create_lock to prevent race conditions with viewer_count.
-        
-        Args:
-            job_id: The job ID to leave
-            session_id: Optional session ID to clean up
-            
-        Returns:
-            True if the stream should be kept, False if it can be cleaned up
-        """
-        async with self._create_lock:  # Protect viewer_count modification
+    def leave_stream(self, job_id: str, session_id: Optional[str] = None) -> bool:
+        """Decrement viewer count when a viewer leaves a shared stream."""
+        with self._create_lock:
             job = self.jobs.get(job_id)
             if not job:
                 return False
             
-            # Clean up session tracking
             if session_id and session_id in self._viewer_sessions:
                 del self._viewer_sessions[session_id]
             
-            # Decrement viewer count
             if job.viewer_count > 0:
                 job.viewer_count -= 1
                 logger.info(f"[StreamShare] Viewer left stream {job_id} (viewers remaining: {job.viewer_count})")
             
-            # If no more viewers and stream is complete, it can be cleaned up earlier
             if job.viewer_count == 0 and job.stream_key:
                 job.is_shared = False
-                # Don't remove from _shared_streams yet - let cleanup handle it
-                # This allows new viewers to join even after all leave briefly
             
             return job.viewer_count > 0
     
@@ -459,7 +461,7 @@ class JobManager:
             job.last_accessed = datetime.utcnow()
         return job
     
-    async def cancel_job(self, job_id: str) -> bool:
+    def cancel_job(self, job_id: str) -> bool:
         """Cancel a job."""
         job = self.jobs.get(job_id)
         if not job:
@@ -471,13 +473,13 @@ class JobManager:
         job.cancel_event.set()
         job.status = JobStatus.CANCELLED
         job.completed_at = datetime.utcnow()
+        if self.capability_service:
+            self.capability_service.revoke_job(job_id)
         
-        # Remove from shared streams tracking so new requests create fresh jobs
         if job.stream_key and job.stream_key in self._shared_streams:
             del self._shared_streams[job.stream_key]
             logger.info(f"[StreamShare] Removed cancelled stream {job_id} from shared streams")
         
-        # Clean up temp files
         self.engine.cleanup_job(job_id)
         job.cleaned_up = True
         
@@ -497,94 +499,63 @@ class JobManager:
         return list(self.jobs.values())
     
     def touch_job(self, job_id: str) -> None:
-        """Update last_accessed time for a job (call when streaming segments)."""
+        """Update last_accessed time for a job."""
         job = self.jobs.get(job_id)
         if job:
             job.last_accessed = datetime.utcnow()
     
-    async def restart_stale_stream(self, job_id: str) -> Optional[Job]:
-        """
-        Restart a stale streaming job that stopped generating segments.
-        
-        This handles the case where a user leaves and comes back, but FFmpeg
-        has stopped or crashed. Creates a new job with the same parameters
-        and cleans up the old one.
-        
-        Returns:
-            New Job if restart succeeded, None if not applicable
-        """
+    def restart_stale_stream(self, job_id: str) -> Optional[Job]:
+        """Restart a stale streaming job."""
         job = self.jobs.get(job_id)
         if not job:
             return None
         
-        # Only restart streaming jobs
         if job.request.mode not in [TranscodeMode.STREAM, TranscodeMode.ABR]:
             return None
         
         logger.info(f"[StreamRestart] Restarting stale stream {job_id}")
         
-        # Cancel the old job and clean it up
         old_stream_key = job.stream_key
         job.cancel_event.set()
         
-        # Wait briefly for cancellation to propagate
-        await asyncio.sleep(0.5)
+        gevent.sleep(0.5)
         
-        # Clean up old job files
         self.engine.cleanup_job(job_id)
         job.cleaned_up = True
         job.status = JobStatus.CANCELLED
         
-        # Remove from shared streams so new job can take over
         if old_stream_key and old_stream_key in self._shared_streams:
             del self._shared_streams[old_stream_key]
         
-        # Remove old job from tracking
         if job_id in self.jobs:
             del self.jobs[job_id]
         
-        # Create a fresh job with the same request
-        # This will get a new job_id but same stream_key
-        new_job = await self.create_job(job.request)
+        new_job = self.create_job(job.request)
         
         logger.info(f"[StreamRestart] Created new job {new_job.id} to replace stale {job_id}")
         return new_job
     
     def is_stream_stale(self, job_id: str, stale_threshold: float = 30.0) -> bool:
-        """
-        Check if a streaming job's output is stale (not being updated).
-        
-        Args:
-            job_id: The job to check
-            stale_threshold: Seconds without playlist update to consider stale
-            
-        Returns:
-            True if stream appears stale and needs restart
-        """
+        """Check if a streaming job's output is stale (not being updated)."""
         job = self.jobs.get(job_id)
         if not job:
             return False
         
-        # Only check streaming jobs that are supposedly processing
         if job.request.mode not in [TranscodeMode.STREAM, TranscodeMode.ABR]:
             return False
         
         if job.status != JobStatus.PROCESSING:
             return False
         
-        # Check playlist file modification time
-        from pathlib import Path
         import time
         
         config = get_config()
         playlist_path = Path(config.transcoding.temp_directory) / job_id / "master.m3u8"
         
         if not playlist_path.exists():
-            # No playlist yet - might still be starting up
-            # Check if job has been processing for too long without output
             if job.started_at:
                 time_since_start = (datetime.utcnow() - job.started_at).total_seconds()
-                if time_since_start > 60:  # 1 minute without playlist = stale
+                if time_since_start > 60:
                     return True
             return False
         
@@ -595,7 +566,7 @@ class JobManager:
         except Exception:
             return False
     
-    async def cleanup_job(self, job_id: str) -> bool:
+    def cleanup_job(self, job_id: str) -> bool:
         """Explicitly clean up a job's temp files and remove from tracking."""
         job = self.jobs.get(job_id)
         if not job:
@@ -604,37 +575,37 @@ class JobManager:
         if not job.cleaned_up:
             self.engine.cleanup_job(job_id)
             job.cleaned_up = True
+            if self.capability_service:
+                self.capability_service.revoke_job(job_id)
             logger.info(f"[Cleanup] Cleaned up job {job_id}")
         
         return True
     
-    async def remove_job(self, job_id: str) -> bool:
+    def remove_job(self, job_id: str) -> bool:
         """Remove a job from tracking (after cleanup)."""
         job = self.jobs.get(job_id)
         if not job:
             return False
         
-        # Clean up first if not already done
         if not job.cleaned_up:
-            await self.cleanup_job(job_id)
+            self.cleanup_job(job_id)
+
+        if self.capability_service:
+            self.capability_service.revoke_job(job_id)
         
-        # Remove from shared streams tracking
         if job.stream_key and job.stream_key in self._shared_streams:
             del self._shared_streams[job.stream_key]
-            logger.debug(f"[StreamShare] Removed stream key {job.stream_key} from shared streams")
         
-        # Clean up any viewer sessions pointing to this job
         sessions_to_remove = [sid for sid, jid in self._viewer_sessions.items() if jid == job_id]
         for sid in sessions_to_remove:
             del self._viewer_sessions[sid]
         
-        # Remove from jobs dict
         del self.jobs[job_id]
         logger.debug(f"[Cleanup] Removed job {job_id} from tracking")
         return True
     
-    async def _cleanup_loop(self) -> None:
-        """Background task that periodically cleans up stale jobs and orphaned directories."""
+    def _cleanup_loop(self) -> None:
+        """Background greenlet that periodically cleans up stale jobs."""
         logger.info("[Cleanup] Starting cleanup loop")
         
         orphan_cleanup_counter = 0
@@ -642,29 +613,27 @@ class JobManager:
         
         while self._running:
             try:
-                await asyncio.sleep(self._cleanup_interval)
-                await self._cleanup_stale_jobs()
+                gevent.sleep(self._cleanup_interval)
+                self._cleanup_stale_jobs()
                 
-                # Run orphan cleanup every 3 cycles (15 minutes with 5min interval)
                 orphan_cleanup_counter += 1
                 if orphan_cleanup_counter >= 3:
-                    await self._cleanup_orphaned_dirs()
+                    self._cleanup_orphaned_dirs()
                     orphan_cleanup_counter = 0
                 
-                # Check worker health every cycle
                 worker_health_counter += 1
                 if worker_health_counter >= 1:
-                    await self._check_worker_health()
+                    self._check_worker_health()
                     worker_health_counter = 0
                     
-            except asyncio.CancelledError:
+            except gevent.GreenletExit:
                 break
             except Exception as e:
                 logger.error(f"[Cleanup] Error in cleanup loop: {e}")
         
         logger.info("[Cleanup] Cleanup loop stopped")
     
-    async def _cleanup_stale_jobs(self) -> int:
+    def _cleanup_stale_jobs(self) -> int:
         """Clean up jobs that haven't been accessed recently."""
         now = datetime.utcnow()
         cleaned = 0
@@ -672,35 +641,27 @@ class JobManager:
         jobs_to_remove = []
         
         for job_id, job in list(self.jobs.items()):
-            # Check for stalled active streams (no access for > 5 mins)
             if job.status == JobStatus.PROCESSING and job.request.mode in (TranscodeMode.STREAM, TranscodeMode.ABR):
-                # Calculate time since last access
                 time_since_access = (now - job.last_accessed).total_seconds()
                 
-                # Also check time since start to avoid killing just-started jobs
                 time_since_start = 0
                 if job.started_at:
                     time_since_start = (now - job.started_at).total_seconds()
                 
-                # Allow at least 2 minutes grace period from start
                 if time_since_start > 120 and time_since_access > 300:
                     logger.info(f"[Cleanup] Job {job_id} stalled (no access for {time_since_access:.0f}s), cancelling")
-                    await self.cancel_job(job_id)
+                    self.cancel_job(job_id)
                     continue
 
-            # Skip active/processing jobs for normal cleanup
             if job.status in (JobStatus.QUEUED, JobStatus.PROCESSING):
                 continue
             
-            # Skip shared streams that still have active viewers
             if job.viewer_count > 0:
                 continue
             
-            # Calculate age based on last access or completion
             if job.completed_at:
                 age = (now - job.last_accessed).total_seconds()
                 
-                # Different TTL for streaming vs completed
                 if job.request.mode in (TranscodeMode.STREAM, TranscodeMode.ABR):
                     ttl = self._job_ttl_streaming
                 else:
@@ -710,12 +671,10 @@ class JobManager:
                     jobs_to_remove.append(job_id)
         
         for job_id in jobs_to_remove:
-            await self.cleanup_job(job_id)
-            # Keep job metadata for a bit longer, just clean files
+            self.cleanup_job(job_id)
             cleaned += 1
         
-        # Also remove very old job metadata (24h after cleanup)
-        metadata_ttl = 86400  # 24 hours
+        metadata_ttl = 86400
         for job_id, job in list(self.jobs.items()):
             if job.cleaned_up and job.completed_at:
                 age = (now - job.completed_at).total_seconds()
@@ -727,8 +686,8 @@ class JobManager:
         
         return cleaned
     
-    async def _cleanup_orphaned_dirs(self) -> int:
-        """Clean up temp directories that don't have a matching job (orphaned)."""
+    def _cleanup_orphaned_dirs(self) -> int:
+        """Clean up temp directories that don't have a matching job."""
         temp_dir = Path(self.engine.temp_dir)
         if not temp_dir.exists():
             return 0
@@ -740,7 +699,6 @@ class JobManager:
             if item.is_dir():
                 job_id = item.name
                 if job_id not in known_job_ids:
-                    # Orphaned directory - clean it up
                     try:
                         import shutil
                         shutil.rmtree(item, ignore_errors=True)
@@ -754,55 +712,40 @@ class JobManager:
         
         return cleaned
     
-    async def _check_worker_health(self) -> None:
-        """
-        Check if all workers are still running and restart any that crashed.
-        
-        This prevents silent throughput loss when a worker dies unexpectedly.
-        """
+    def _check_worker_health(self) -> None:
+        """Check if all workers are still running and restart any that crashed."""
         max_workers = self.config.transcoding.max_concurrent_jobs
         
-        # Count alive workers
         alive_workers = []
         dead_workers = []
         
         for i, worker in enumerate(self._workers):
-            if worker.done():
-                # Worker finished - check if it was an error
-                try:
-                    exc = worker.exception()
-                    if exc:
-                        logger.error(f"[WorkerHealth] Worker {i} crashed with: {exc}")
-                        dead_workers.append(i)
-                    else:
-                        # Worker finished cleanly (shouldn't happen while running)
-                        dead_workers.append(i)
-                except asyncio.CancelledError:
-                    dead_workers.append(i)
+            if worker.dead:
+                exc = worker.exception
+                if exc:
+                    logger.error(f"[WorkerHealth] Worker {i} crashed with: {exc}")
+                dead_workers.append(i)
             else:
                 alive_workers.append(i)
         
-        # Restart dead workers
         if dead_workers and self._running:
             logger.warning(f"[WorkerHealth] {len(dead_workers)} worker(s) died, restarting...")
             
-            # Remove dead workers from list
             self._workers = [w for i, w in enumerate(self._workers) if i not in dead_workers]
             
-            # Start new workers to replace dead ones
             for i in range(len(dead_workers)):
                 new_worker_id = len(self._workers)
-                new_worker = asyncio.create_task(self._worker(new_worker_id))
+                new_worker = gevent.spawn(self._worker, new_worker_id)
                 self._workers.append(new_worker)
                 logger.info(f"[WorkerHealth] Started replacement worker {new_worker_id}")
     
-    async def _cleanup_all_jobs(self) -> None:
+    def _cleanup_all_jobs(self) -> None:
         """Clean up all jobs (called on shutdown)."""
         logger.info(f"[Cleanup] Cleaning up {len(self.jobs)} job(s) on shutdown")
         
         for job_id in list(self.jobs.keys()):
             try:
-                await self.cleanup_job(job_id)
+                self.cleanup_job(job_id)
             except Exception as e:
                 logger.warning(f"[Cleanup] Error cleaning job {job_id}: {e}")
     
@@ -822,11 +765,10 @@ class JobManager:
                 cleaned += 1
             elif job.status == JobStatus.READY:
                 ready += 1
-                # Check if stale
                 if job.completed_at:
                     age = (now - job.last_accessed).total_seconds()
                     ttl = self._job_ttl_streaming if job.request.mode in (TranscodeMode.STREAM, TranscodeMode.ABR) else self._job_ttl_completed
-                    if age > ttl * 0.8:  # 80% of TTL = nearly stale
+                    if age > ttl * 0.8:
                         stale += 1
         
         return {

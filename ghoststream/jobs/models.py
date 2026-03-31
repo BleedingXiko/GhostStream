@@ -2,7 +2,7 @@
 Job data models for GhostStream
 """
 
-import asyncio
+import gevent.event
 from datetime import datetime
 from typing import Optional
 from dataclasses import dataclass, field
@@ -27,24 +27,32 @@ class Job:
     eta_seconds: Optional[int] = None
     hw_accel_used: Optional[str] = None
     error_message: Optional[str] = None
+    control_token: Optional[str] = None
     created_at: datetime = field(default_factory=datetime.utcnow)
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     last_accessed: datetime = field(default_factory=datetime.utcnow)
-    cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
+    cancel_event: gevent.event.Event = field(default_factory=gevent.event.Event)
     cleaned_up: bool = False
     # Stream sharing fields
     stream_key: Optional[str] = None  # Key for shared stream lookup
     viewer_count: int = 0  # Number of active viewers sharing this stream
     is_shared: bool = False  # Whether this job is being shared by multiple viewers
     
-    def to_response(self) -> TranscodeResponse:
+    def to_response(
+        self,
+        *,
+        stream_url_override: Optional[str] = None,
+        download_url_override: Optional[str] = None,
+        control_token: Optional[str] = None,
+    ) -> TranscodeResponse:
         return TranscodeResponse(
             job_id=self.id,
             status=self.status,
             progress=self.progress,
-            stream_url=self.stream_url,
-            download_url=self.download_url,
+            stream_url=stream_url_override or self.stream_url,
+            control_token=control_token,
+            download_url=download_url_override or self.download_url,
             duration=self.duration,
             eta_seconds=self.eta_seconds,
             hw_accel_used=self.hw_accel_used,
@@ -55,15 +63,22 @@ class Job:
             viewer_count=self.viewer_count
         )
     
-    def to_status_response(self) -> JobStatusResponse:
+    def to_status_response(
+        self,
+        *,
+        stream_url_override: Optional[str] = None,
+        download_url_override: Optional[str] = None,
+        control_token: Optional[str] = None,
+    ) -> JobStatusResponse:
         return JobStatusResponse(
             job_id=self.id,
             status=self.status,
             progress=self.progress,
             current_time=self.current_time,
             duration=self.duration,
-            stream_url=self.stream_url,
-            download_url=self.download_url,
+            stream_url=stream_url_override or self.stream_url,
+            download_url=download_url_override or self.download_url,
+            control_token=control_token,
             eta_seconds=self.eta_seconds,
             hw_accel_used=self.hw_accel_used,
             error_message=self.error_message,

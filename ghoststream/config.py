@@ -13,6 +13,7 @@ from pydantic_settings import BaseSettings
 class ServerConfig(BaseModel):
     host: str = "0.0.0.0"
     port: int = 8765
+    advertised_url: Optional[str] = None
 
 
 class MDNSConfig(BaseModel):
@@ -76,6 +77,11 @@ class SecurityConfig(BaseModel):
     api_key: Optional[str] = None
     allowed_origins: List[str] = Field(default_factory=list)
     rate_limit_per_minute: int = 60
+    state_directory: str = Field(
+        default_factory=lambda: str(Path.home() / ".ghoststream")
+    )
+    registration_secret: Optional[str] = None
+    job_token_ttl_seconds: int = 21600
 
 
 class LoggingConfig(BaseModel):

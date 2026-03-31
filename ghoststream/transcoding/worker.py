@@ -1,19 +1,17 @@
 """
-Global FFmpeg worker wrapper for GhostStream.
+Global FFmpeg worker wrapper for GhostStream — Specter-native (gevent).
 
-Provides a centralized process management layer for FFmpeg operations with:
-- Process lifecycle management
-- Resource tracking
-- Graceful shutdown handling
-- Cross-platform signal support
+Uses subprocess.Popen + gevent primitives instead of asyncio.
 """
 
-import asyncio
 import logging
 import signal
 import subprocess
 import sys
 import time
+import gevent
+import gevent.event
+import gevent.lock
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -46,7 +44,6 @@ class WorkerStats:
     
     @property
     def duration_seconds(self) -> float:
-        """Get worker run duration in seconds."""
         if not self.start_time:
             return 0.0
         end = self.end_time or datetime.utcnow()
@@ -55,23 +52,18 @@ class WorkerStats:
 
 @dataclass
 class FFmpegWorker:
-    """
-    Wrapper around a single FFmpeg process.
-    
-    Manages the lifecycle of an FFmpeg process including startup,
-    progress monitoring, and graceful shutdown.
-    """
+    """Wrapper around a single FFmpeg process (gevent-native)."""
     worker_id: str
     command: List[str]
     working_dir: Optional[Path] = None
     state: WorkerState = WorkerState.IDLE
-    process: Optional[asyncio.subprocess.Process] = None
+    process: Optional[subprocess.Popen] = None
     stats: WorkerStats = field(default_factory=WorkerStats)
-    _cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
+    _cancel_event: gevent.event.Event = field(default_factory=gevent.event.Event)
     _stdout_buffer: List[bytes] = field(default_factory=list)
     _stderr_buffer: List[str] = field(default_factory=list)
     
-    async def start(self) -> bool:
+    def start(self) -> bool:
         """Start the FFmpeg process."""
         if self.state != WorkerState.IDLE:
             logger.warning(f"[Worker {self.worker_id}] Cannot start - state is {self.state}")
@@ -82,20 +74,17 @@ class FFmpegWorker:
         
         try:
             kwargs: Dict[str, Any] = {
-                "stdout": asyncio.subprocess.PIPE,
-                "stderr": asyncio.subprocess.PIPE,
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.PIPE,
             }
             
             if self.working_dir:
                 kwargs["cwd"] = str(self.working_dir)
             
-            # Windows-specific process group for signal handling
             if sys.platform == "win32":
                 kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
             
-            self.process = await asyncio.create_subprocess_exec(
-                *self.command, **kwargs
-            )
+            self.process = subprocess.Popen(self.command, **kwargs)
             
             self.state = WorkerState.RUNNING
             logger.info(f"[Worker {self.worker_id}] Started FFmpeg process (PID: {self.process.pid})")
@@ -107,24 +96,15 @@ class FFmpegWorker:
             logger.error(f"[Worker {self.worker_id}] Failed to start: {e}")
             return False
     
-    async def stop(self, timeout: float = 10.0) -> int:
-        """
-        Stop the FFmpeg process gracefully.
-        
-        Args:
-            timeout: Maximum time to wait for graceful shutdown
-            
-        Returns:
-            Process return code (-1 if failed to stop)
-        """
-        if self.process is None or self.process.returncode is not None:
+    def stop(self, timeout: float = 10.0) -> int:
+        """Stop the FFmpeg process gracefully."""
+        if self.process is None or self.process.poll() is not None:
             return self.process.returncode if self.process else -1
         
         self.state = WorkerState.STOPPING
         self._cancel_event.set()
         
         try:
-            # Try graceful shutdown first
             if sys.platform == "win32":
                 try:
                     self.process.send_signal(signal.CTRL_BREAK_EVENT)
@@ -136,31 +116,28 @@ class FFmpegWorker:
                 except (ProcessLookupError, OSError):
                     pass
             
-            # Wait for graceful shutdown
             try:
-                await asyncio.wait_for(self.process.wait(), timeout=timeout * 0.5)
+                gevent.with_timeout(timeout * 0.5, self.process.wait)
                 self.state = WorkerState.STOPPED
                 self.stats.end_time = datetime.utcnow()
                 self.stats.return_code = self.process.returncode
                 return self.process.returncode
-            except asyncio.TimeoutError:
+            except gevent.Timeout:
                 pass
             
-            # Escalate to terminate
             try:
                 self.process.terminate()
-                await asyncio.wait_for(self.process.wait(), timeout=timeout * 0.3)
+                gevent.with_timeout(timeout * 0.3, self.process.wait)
                 self.state = WorkerState.STOPPED
                 self.stats.end_time = datetime.utcnow()
                 self.stats.return_code = self.process.returncode
                 return self.process.returncode
-            except (asyncio.TimeoutError, ProcessLookupError, OSError):
+            except (gevent.Timeout, ProcessLookupError, OSError):
                 pass
             
-            # Force kill
             try:
                 self.process.kill()
-                await self.process.wait()
+                self.process.wait()
             except (ProcessLookupError, OSError):
                 pass
             
@@ -177,86 +154,63 @@ class FFmpegWorker:
             self.stats.error_message = str(e)
             return -1
     
-    async def wait(self) -> int:
+    def wait(self) -> int:
         """Wait for the process to complete."""
         if self.process is None:
             return -1
         
-        await self.process.wait()
+        self.process.wait()
         self.state = WorkerState.STOPPED
         self.stats.end_time = datetime.utcnow()
         self.stats.return_code = self.process.returncode
         return self.process.returncode if self.process.returncode is not None else -1
     
     def get_stderr(self) -> str:
-        """Get accumulated stderr output."""
         return "".join(self._stderr_buffer)
     
     def is_running(self) -> bool:
-        """Check if the worker is currently running."""
-        return self.state == WorkerState.RUNNING and self.process is not None and self.process.returncode is None
+        return self.state == WorkerState.RUNNING and self.process is not None and self.process.poll() is None
 
 
 class FFmpegWorkerPool:
-    """
-    Pool of FFmpeg worker processes.
-    
-    Manages multiple FFmpeg processes with:
-    - Concurrency limiting
-    - Resource tracking
-    - Centralized shutdown
-    """
+    """Pool of FFmpeg worker processes (gevent-native)."""
     
     def __init__(self, max_workers: int = 4):
         self.max_workers = max_workers
         self._workers: Dict[str, FFmpegWorker] = {}
-        self._semaphore = asyncio.Semaphore(max_workers)
-        self._lock = asyncio.Lock()
+        self._semaphore = gevent.lock.BoundedSemaphore(max_workers)
+        self._lock = gevent.lock.BoundedSemaphore(1)
         self._running = False
         
-    async def start(self) -> None:
-        """Start the worker pool."""
+    def start(self) -> None:
         self._running = True
         logger.info(f"[WorkerPool] Started with max {self.max_workers} workers")
     
-    async def stop(self) -> None:
-        """Stop all workers and the pool."""
+    def stop(self) -> None:
         self._running = False
         
-        # Stop all active workers
-        async with self._lock:
-            stop_tasks = []
+        with self._lock:
+            stop_greenlets = []
             for worker_id, worker in self._workers.items():
                 if worker.is_running():
-                    stop_tasks.append(worker.stop())
+                    stop_greenlets.append(gevent.spawn(worker.stop))
             
-            if stop_tasks:
-                await asyncio.gather(*stop_tasks, return_exceptions=True)
+            if stop_greenlets:
+                gevent.joinall(stop_greenlets, timeout=30)
         
         logger.info(f"[WorkerPool] Stopped, {len(self._workers)} workers cleaned up")
     
-    async def create_worker(
+    def create_worker(
         self,
         worker_id: str,
         command: List[str],
         working_dir: Optional[Path] = None
     ) -> Optional[FFmpegWorker]:
-        """
-        Create and register a new worker.
-        
-        Args:
-            worker_id: Unique identifier for the worker
-            command: FFmpeg command to execute
-            working_dir: Working directory for the process
-            
-        Returns:
-            FFmpegWorker instance or None if pool is full
-        """
         if not self._running:
             logger.warning("[WorkerPool] Cannot create worker - pool is stopped")
             return None
         
-        async with self._lock:
+        with self._lock:
             if worker_id in self._workers:
                 logger.warning(f"[WorkerPool] Worker {worker_id} already exists")
                 return self._workers[worker_id]
@@ -269,30 +223,20 @@ class FFmpegWorkerPool:
             self._workers[worker_id] = worker
             return worker
     
-    async def acquire_slot(self, timeout: Optional[float] = None) -> bool:
-        """
-        Acquire a worker slot from the pool.
-        
-        Args:
-            timeout: Maximum time to wait for a slot
-            
-        Returns:
-            True if slot acquired, False if timed out
-        """
+    def acquire_slot(self, timeout: Optional[float] = None) -> bool:
         try:
             if timeout:
-                await asyncio.wait_for(self._semaphore.acquire(), timeout=timeout)
+                return gevent.with_timeout(timeout, self._semaphore.acquire)
             else:
-                await self._semaphore.acquire()
-            return True
-        except asyncio.TimeoutError:
+                self._semaphore.acquire()
+                return True
+        except gevent.Timeout:
             return False
     
     def release_slot(self) -> None:
-        """Release a worker slot back to the pool."""
         self._semaphore.release()
     
-    async def run_worker(
+    def run_worker(
         self,
         worker_id: str,
         command: List[str],
@@ -300,58 +244,37 @@ class FFmpegWorkerPool:
         progress_callback: Optional[Callable[[str, int, float], None]] = None,
         timeout: Optional[float] = None
     ) -> Tuple[int, str]:
-        """
-        Run an FFmpeg command using a pooled worker.
-        
-        Args:
-            worker_id: Unique identifier for this job
-            command: FFmpeg command to execute
-            working_dir: Working directory
-            progress_callback: Called with (worker_id, frame, time) on progress
-            timeout: Maximum execution time
-            
-        Returns:
-            Tuple of (return_code, stderr_output)
-        """
-        # Acquire pool slot
-        if not await self.acquire_slot(timeout=30.0):
+        if not self.acquire_slot(timeout=30.0):
             return -1, "Failed to acquire worker slot"
         
         try:
-            worker = await self.create_worker(worker_id, command, working_dir)
+            worker = self.create_worker(worker_id, command, working_dir)
             if not worker:
                 return -1, "Failed to create worker"
             
-            if not await worker.start():
+            if not worker.start():
                 return -1, worker.stats.error_message
             
-            # Read output concurrently
-            async def read_stderr():
+            def read_stderr():
+                import re as re_mod
                 while worker.is_running():
                     try:
-                        line = await asyncio.wait_for(
-                            worker.process.stderr.readline(),
-                            timeout=1.0
-                        )
+                        line = worker.process.stderr.readline()
                         if not line:
                             break
                         
                         line_str = line.decode("utf-8", errors="ignore")
                         worker._stderr_buffer.append(line_str)
                         
-                        # Keep buffer bounded
                         if len(worker._stderr_buffer) > 200:
                             worker._stderr_buffer.pop(0)
                         
-                        # Parse progress if callback provided
                         if progress_callback and "frame=" in line_str:
                             worker.stats.last_progress_time = datetime.utcnow()
-                            # Extract frame number
-                            import re
-                            match = re.search(r"frame=\s*(\d+)", line_str)
+                            match = re_mod.search(r"frame=\s*(\d+)", line_str)
                             if match:
                                 worker.stats.frames_processed = int(match.group(1))
-                            match = re.search(r"time=\s*(\d+):(\d+):(\d+\.?\d*)", line_str)
+                            match = re_mod.search(r"time=\s*(\d+):(\d+):(\d+\.?\d*)", line_str)
                             if match:
                                 h, m, s = match.groups()
                                 time_val = int(h) * 3600 + int(m) * 60 + float(s)
@@ -360,55 +283,48 @@ class FFmpegWorkerPool:
                                     worker.stats.frames_processed,
                                     time_val
                                 )
-                    except asyncio.TimeoutError:
-                        continue
                     except Exception as e:
                         logger.debug(f"[Worker {worker_id}] stderr read error: {e}")
                         break
             
-            async def read_stdout():
+            def read_stdout():
                 while worker.is_running():
                     try:
-                        chunk = await worker.process.stdout.read(4096)
+                        chunk = worker.process.stdout.read(4096)
                         if not chunk:
                             break
                         worker._stdout_buffer.append(chunk)
                     except Exception:
                         break
             
-            # Run readers and wait for completion
-            stderr_task = asyncio.create_task(read_stderr())
-            stdout_task = asyncio.create_task(read_stdout())
+            stderr_glet = gevent.spawn(read_stderr)
+            stdout_glet = gevent.spawn(read_stdout)
             
             try:
                 if timeout:
-                    return_code = await asyncio.wait_for(worker.wait(), timeout=timeout)
+                    return_code = gevent.with_timeout(timeout, worker.wait)
                 else:
-                    return_code = await worker.wait()
-            except asyncio.TimeoutError:
+                    return_code = worker.wait()
+            except gevent.Timeout:
                 logger.warning(f"[Worker {worker_id}] Timed out after {timeout}s")
-                await worker.stop()
+                worker.stop()
                 return_code = -1
             
-            # Wait for readers to finish
-            await asyncio.gather(stderr_task, stdout_task, return_exceptions=True)
+            gevent.joinall([stderr_glet, stdout_glet], timeout=5)
             
             return return_code, worker.get_stderr()
             
         finally:
-            # Clean up worker
-            async with self._lock:
+            with self._lock:
                 if worker_id in self._workers:
                     del self._workers[worker_id]
             
             self.release_slot()
     
     def get_active_count(self) -> int:
-        """Get number of active workers."""
         return sum(1 for w in self._workers.values() if w.is_running())
     
     def get_stats(self) -> Dict[str, Any]:
-        """Get pool statistics."""
         return {
             "max_workers": self.max_workers,
             "active_workers": self.get_active_count(),
@@ -423,23 +339,20 @@ _worker_pool: Optional[FFmpegWorkerPool] = None
 
 
 def get_worker_pool(max_workers: int = 4) -> FFmpegWorkerPool:
-    """Get the global worker pool instance."""
     global _worker_pool
     if _worker_pool is None:
         _worker_pool = FFmpegWorkerPool(max_workers)
     return _worker_pool
 
 
-async def init_worker_pool(max_workers: int = 4) -> FFmpegWorkerPool:
-    """Initialize and start the global worker pool."""
+def init_worker_pool(max_workers: int = 4) -> FFmpegWorkerPool:
     pool = get_worker_pool(max_workers)
-    await pool.start()
+    pool.start()
     return pool
 
 
-async def shutdown_worker_pool() -> None:
-    """Shutdown the global worker pool."""
+def shutdown_worker_pool() -> None:
     global _worker_pool
     if _worker_pool:
-        await _worker_pool.stop()
+        _worker_pool.stop()
         _worker_pool = None

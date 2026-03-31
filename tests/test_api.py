@@ -5,9 +5,10 @@ Tests for GhostStream API endpoints
 import pytest
 from fastapi.testclient import TestClient
 
-from ghoststream.api import app
+from ghoststream.api.app import create_app
 from ghoststream.config import load_config, set_config
 from ghoststream import __version__
+from ghoststream.runtime import create_runtime
 
 
 @pytest.fixture(scope="module")
@@ -16,7 +17,18 @@ def client():
     # Load default config
     config = load_config()
     set_config(config)
-    
+
+    app = create_app()
+    runtime = create_runtime()
+
+    @app.on_event("startup")
+    async def _startup_runtime() -> None:
+        await runtime.start()
+
+    @app.on_event("shutdown")
+    async def _shutdown_runtime() -> None:
+        await runtime.stop()
+
     with TestClient(app) as c:
         yield c
 
@@ -117,17 +129,18 @@ class TestTranscodeEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert "job_id" in data
+        assert "control_token" in data
         assert data["status"] in ["queued", "processing"]
     
     def test_get_nonexistent_job(self, client):
-        """Getting nonexistent job should return 404."""
+        """Getting a job without a control token should be rejected."""
         response = client.get("/api/transcode/nonexistent-id/status")
-        assert response.status_code == 404
+        assert response.status_code == 403
     
     def test_cancel_nonexistent_job(self, client):
-        """Canceling nonexistent job should return 400."""
+        """Canceling a job without a control token should be rejected."""
         response = client.post("/api/transcode/nonexistent-id/cancel")
-        assert response.status_code == 400
+        assert response.status_code == 403
 
 
 class TestWebSocket:

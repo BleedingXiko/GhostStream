@@ -1,9 +1,6 @@
-"""
-API package for GhostStream
-"""
+"""Backwards-compatibility re-exports — real implementation lives in ghoststream.network."""
 
-from .app import app, create_app
-from .websocket import (
+from ..network.websocket import (
     broadcast_progress,
     broadcast_status,
     get_websocket_manager,
@@ -11,16 +8,12 @@ from .websocket import (
     WebSocketConnection,
     ConnectionState,
 )
-from .middleware import api_key_middleware
 
 __all__ = [
-    "app",
-    "create_app",
     "broadcast_progress",
     "broadcast_status",
     "get_websocket_manager",
     "WebSocketManager",
     "WebSocketConnection",
     "ConnectionState",
-    "api_key_middleware",
 ]

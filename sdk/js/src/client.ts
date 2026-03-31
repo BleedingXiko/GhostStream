@@ -39,6 +39,7 @@ export class GhostStreamClient {
   private baseUrl: string;
   private wsUrl: string;
   private config: ClientConfig;
+  private controlTokens = new Map<string, string>();
 
   /**
    * Create a new GhostStream client
@@ -66,7 +67,8 @@ export class GhostStreamClient {
   private async request<T>(
     method: string,
     path: string,
-    body?: unknown
+    body?: unknown,
+    headers: Record<string, string> = {}
   ): Promise<T | null> {
     const url = `${this.baseUrl}${path}`;
     
@@ -81,7 +83,8 @@ export class GhostStreamClient {
         const response = await fetch(url, {
           method,
           headers: {
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            ...headers
           },
           body: body ? JSON.stringify(body) : undefined,
           signal: controller.signal
@@ -113,12 +116,13 @@ export class GhostStreamClient {
    * Convert snake_case API response to camelCase
    */
   private toTranscodeJob(data: Record<string, unknown>): TranscodeJob {
-    return {
+    const job = {
       jobId: data.job_id as string,
       status: data.status as TranscodeStatus,
       progress: (data.progress as number) ?? 0,
       streamUrl: data.stream_url as string | undefined,
       downloadUrl: data.download_url as string | undefined,
+      controlToken: data.control_token as string | undefined,
       duration: data.duration as number | undefined,
       currentTime: data.current_time as number | undefined,
       etaSeconds: data.eta_seconds as number | undefined,
@@ -127,6 +131,15 @@ export class GhostStreamClient {
       createdAt: data.created_at as string | undefined,
       startedAt: data.started_at as string | undefined
     };
+    if (job.controlToken) {
+      this.controlTokens.set(job.jobId, job.controlToken);
+    }
+    return job;
+  }
+
+  private controlHeaders(jobId: string): Record<string, string> {
+    const token = this.controlTokens.get(jobId);
+    return token ? { 'X-GhostStream-Control-Token': token } : {};
   }
 
   // ==================== Health & Capabilities ====================
@@ -192,7 +205,9 @@ export class GhostStreamClient {
   async getJobStatus(jobId: string): Promise<TranscodeJob | null> {
     const result = await this.request<Record<string, unknown>>(
       'GET',
-      `/api/transcode/${jobId}/status`
+      `/api/transcode/${jobId}/status`,
+      undefined,
+      this.controlHeaders(jobId)
     );
     return result ? this.toTranscodeJob(result) : null;
   }
@@ -244,9 +259,15 @@ export class GhostStreamClient {
   async cancelJob(jobId: string): Promise<boolean> {
     const result = await this.request<{ status: string }>(
       'POST',
-      `/api/transcode/${jobId}/cancel`
+      `/api/transcode/${jobId}/cancel`,
+      undefined,
+      this.controlHeaders(jobId)
     );
-    return result?.status === 'cancelled';
+    const success = result?.status === 'cancelled';
+    if (success) {
+      this.controlTokens.delete(jobId);
+    }
+    return success;
   }
 
   /**
@@ -255,9 +276,15 @@ export class GhostStreamClient {
   async deleteJob(jobId: string): Promise<boolean> {
     const result = await this.request<{ status: string }>(
       'DELETE',
-      `/api/transcode/${jobId}`
+      `/api/transcode/${jobId}`,
+      undefined,
+      this.controlHeaders(jobId)
     );
-    return result !== null;
+    const success = result !== null;
+    if (success) {
+      this.controlTokens.delete(jobId);
+    }
+    return success;
   }
 
   // ==================== WebSocket ====================
@@ -284,9 +311,15 @@ export class GhostStreamClient {
     let closed = false;
 
     ws.onopen = () => {
+      const jobTokens = Object.fromEntries(
+        jobIds
+          .map((jobId) => [jobId, this.controlTokens.get(jobId)])
+          .filter((entry): entry is [string, string] => Boolean(entry[1]))
+      );
       ws.send(JSON.stringify({
         type: 'subscribe',
-        job_ids: jobIds
+        job_ids: jobIds,
+        job_tokens: jobTokens
       }));
     };
 

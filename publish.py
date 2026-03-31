@@ -9,12 +9,14 @@ import shutil
 import subprocess
 import re
 from pathlib import Path
+import shlex
 
 ROOT_DIR = Path(__file__).parent
 SDK_JS_DIR = ROOT_DIR / "sdk" / "js"
 PYTHON_INIT = ROOT_DIR / "ghoststream" / "__init__.py"
 JS_PACKAGE_JSON = SDK_JS_DIR / "package.json"
 DIST_DIR = ROOT_DIR / "dist"
+PYTHON_CMD = shlex.quote(sys.executable)
 
 
 def run_cmd(cmd, cwd=None, check=True):
@@ -102,12 +104,12 @@ def publish_python(skip_build=False):
     if not skip_build:
         # Build package
         print("\n→ Building Python package...")
-        run_cmd("python -m build")
+        run_cmd(f"{PYTHON_CMD} -m build")
         print("✓ Python package built successfully")
     
     # Upload to PyPI
     print("\n→ Uploading to PyPI...")
-    run_cmd("python -m twine upload dist/*")
+    run_cmd(f"{PYTHON_CMD} -m twine upload dist/*")
     print("✓ Python package published to PyPI!")
 
 

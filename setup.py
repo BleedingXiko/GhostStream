@@ -41,6 +41,8 @@ server_requirements = [
     # Core Framework
     "fastapi>=0.109.0",
     "uvicorn[standard]>=0.27.0",
+    "flask>=3.0.0",
+    "gevent>=24.2.1",
     "python-multipart>=0.0.9",
     # Configuration
     "pyyaml>=6.0.1",

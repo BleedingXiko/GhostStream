@@ -105,6 +105,10 @@ class TestHealthEndpoints:
 
 class TestTranscodeEndpoints:
     """Test transcoding job endpoints."""
+
+    @staticmethod
+    def _control_headers(control_token: str) -> dict:
+        return {"X-GhostStream-Control-Token": control_token}
     
     def test_start_requires_source(self, api_client):
         """Start should require source URL."""
@@ -122,7 +126,8 @@ class TestTranscodeEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert "job_id" in data
-        cleanup_jobs.append(data["job_id"])
+        assert "control_token" in data
+        cleanup_jobs.append((data["job_id"], data["control_token"]))
     
     def test_start_stream_mode(self, api_client, test_video_url, cleanup_jobs):
         """Start should accept stream mode."""
@@ -142,9 +147,10 @@ class TestTranscodeEndpoints:
         data = response.json()
         assert "job_id" in data
         assert "stream_url" in data
+        assert "control_token" in data
         assert data["status"] in ["queued", "processing"]
         
-        cleanup_jobs.append(data["job_id"])
+        cleanup_jobs.append((data["job_id"], data["control_token"]))
     
     def test_start_abr_mode(self, api_client, test_video_url, cleanup_jobs):
         """Start should accept ABR mode."""
@@ -163,7 +169,7 @@ class TestTranscodeEndpoints:
         data = response.json()
         assert "job_id" in data
         
-        cleanup_jobs.append(data["job_id"])
+        cleanup_jobs.append((data["job_id"], data["control_token"]))
     
     def test_get_job_status(self, api_client, test_video_url, cleanup_jobs):
         """Should get status of existing job."""
@@ -175,11 +181,15 @@ class TestTranscodeEndpoints:
             "source": test_video_url,
             "mode": "stream"
         })
-        job_id = response.json()["job_id"]
-        cleanup_jobs.append(job_id)
+        created = response.json()
+        job_id = created["job_id"]
+        cleanup_jobs.append((job_id, created["control_token"]))
         
         # Get status
-        response = api_client.get(f"/api/transcode/{job_id}/status")
+        response = api_client.get(
+            f"/api/transcode/{job_id}/status",
+            headers=self._control_headers(created["control_token"]),
+        )
         
         assert response.status_code == 200
         data = response.json()
@@ -188,9 +198,9 @@ class TestTranscodeEndpoints:
         assert "progress" in data
     
     def test_get_nonexistent_job(self, api_client):
-        """Should return 404 for nonexistent job."""
+        """Should reject status reads without a control token."""
         response = api_client.get("/api/transcode/nonexistent-job-id/status")
-        assert response.status_code == 404
+        assert response.status_code == 403
     
     def test_cancel_job(self, api_client, test_video_url, cleanup_jobs):
         """Should cancel a running job."""
@@ -202,11 +212,15 @@ class TestTranscodeEndpoints:
             "source": test_video_url,
             "mode": "stream"
         })
-        job_id = response.json()["job_id"]
-        cleanup_jobs.append(job_id)
+        created = response.json()
+        job_id = created["job_id"]
+        cleanup_jobs.append((job_id, created["control_token"]))
         
         # Cancel it
-        response = api_client.post(f"/api/transcode/{job_id}/cancel")
+        response = api_client.post(
+            f"/api/transcode/{job_id}/cancel",
+            headers=self._control_headers(created["control_token"]),
+        )
         
         # Should succeed or indicate job can't be cancelled
         assert response.status_code in [200, 400]
@@ -221,15 +235,19 @@ class TestTranscodeEndpoints:
             "source": test_video_url,
             "mode": "stream"
         })
-        job_id = response.json()["job_id"]
+        created = response.json()
+        job_id = created["job_id"]
         
         # Delete it
-        response = api_client.delete(f"/api/transcode/{job_id}")
+        response = api_client.delete(
+            f"/api/transcode/{job_id}",
+            headers=self._control_headers(created["control_token"]),
+        )
         assert response.status_code == 200
         
         # Should no longer exist
         response = api_client.get(f"/api/transcode/{job_id}/status")
-        assert response.status_code == 404
+        assert response.status_code == 403
 
 
 # =============================================================================
@@ -290,14 +308,16 @@ class TestWebSocket:
             "source": test_video_url,
             "mode": "stream"
         })
-        job_id = response.json()["job_id"]
-        cleanup_jobs.append(job_id)
-        
+        created = response.json()
+        job_id = created["job_id"]
+        cleanup_jobs.append((job_id, created["control_token"]))
+
         # Subscribe via WebSocket
         with api_client.websocket_connect("/ws/progress") as websocket:
             websocket.send_json({
                 "type": "subscribe",
-                "job_ids": [job_id]
+                "job_ids": [job_id],
+                "control_token": created["control_token"],
             })
             
             # Should receive confirmation or initial status
@@ -333,7 +353,7 @@ class TestSharedStreams:
             "output": {"resolution": "480p"}
         })
         job1 = response1.json()
-        cleanup_jobs.append(job1["job_id"])
+        cleanup_jobs.append((job1["job_id"], job1["control_token"]))
         
         # Start second job with same source
         response2 = api_client.post("/api/transcode/start", json={
@@ -345,7 +365,7 @@ class TestSharedStreams:
         
         # Might share the same job (implementation dependent)
         if job1["job_id"] != job2["job_id"]:
-            cleanup_jobs.append(job2["job_id"])
+            cleanup_jobs.append((job2["job_id"], job2["control_token"]))
 
 
 # =============================================================================
@@ -368,7 +388,7 @@ class TestCompatibilityEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert "job_id" in data
-        cleanup_jobs.append(data["job_id"])
+        cleanup_jobs.append((data["job_id"], data["control_token"]))
     
     def test_capabilities_compat(self, api_client):
         """Should work with /capabilities endpoint."""

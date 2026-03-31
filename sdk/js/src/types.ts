@@ -18,6 +18,7 @@ export interface TranscodeJob {
   progress: number;
   streamUrl?: string;
   downloadUrl?: string;
+  controlToken?: string;
   duration?: number;
   currentTime?: number;
   etaSeconds?: number;
