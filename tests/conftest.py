@@ -8,22 +8,97 @@ Provides:
 """
 
 import asyncio
+import json
 import os
 import shutil
+import socket
 import subprocess
 import tempfile
+import threading
+import time
 from pathlib import Path
 from typing import Generator, Optional
+import aiohttp
 import pytest
-from fastapi.testclient import TestClient
+import httpx
 
 # Add project root to path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from ghoststream.api.app import create_app
 from ghoststream.config import load_config, set_config, get_config
 from ghoststream.runtime import create_runtime
+
+
+def _find_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+class WebSocketJSONClient:
+    """Small JSON convenience wrapper around the sync websockets client."""
+
+    def __init__(self, loop, connection):
+        self._loop = loop
+        self._connection = connection
+
+    def send_json(self, payload) -> None:
+        self._loop.run_until_complete(self._connection.send_json(payload))
+
+    def receive_json(self):
+        message = self._loop.run_until_complete(self._connection.receive_json())
+        return message
+
+
+class WebSocketConnectionContext:
+    def __init__(self, url: str):
+        self._url = url
+        self._loop = None
+        self._session = None
+        self._connection = None
+
+    def __enter__(self) -> WebSocketJSONClient:
+        self._loop = asyncio.new_event_loop()
+        self._session, self._connection = self._loop.run_until_complete(self._open())
+        return WebSocketJSONClient(self._loop, self._connection)
+
+    async def _open(self):
+        session = aiohttp.ClientSession()
+        connection = await session.ws_connect(self._url, autoping=True, compress=0)
+        return session, connection
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self._loop is not None and self._connection is not None:
+            self._loop.run_until_complete(self._connection.close())
+        if self._loop is not None and self._session is not None:
+            self._loop.run_until_complete(self._session.__aexit__(exc_type, exc, tb))
+            self._loop.close()
+        return None
+
+
+class GhostStreamTestClient:
+    """HTTP + WebSocket test client for the live GhostStream runtime."""
+
+    def __init__(self, base_url: str):
+        self.base_url = base_url.rstrip("/")
+        self._http = httpx.Client(base_url=self.base_url, timeout=10.0)
+
+    def get(self, *args, **kwargs):
+        return self._http.get(*args, **kwargs)
+
+    def post(self, *args, **kwargs):
+        return self._http.post(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        return self._http.delete(*args, **kwargs)
+
+    def websocket_connect(self, path: str) -> WebSocketConnectionContext:
+        ws_base = self.base_url.replace("http://", "ws://", 1).replace("https://", "wss://", 1)
+        return WebSocketConnectionContext(f"{ws_base}{path}")
+
+    def close(self) -> None:
+        self._http.close()
 
 
 # =============================================================================
@@ -206,41 +281,90 @@ def test_config():
     Uses a temp directory for transcoding output.
     """
     config = load_config()
-    
+
+    config.server.host = "127.0.0.1"
+    config.server.port = _find_free_port()
+    config.mdns.enabled = False
+    config.ghosthub.auto_register = False
+
     # Use temp directory for test transcoding
     config.transcoding.temp_directory = tempfile.mkdtemp(prefix="ghoststream_test_")
     config.transcoding.max_concurrent_jobs = 2
     config.transcoding.stall_timeout = 30  # Shorter for tests
     config.logging.level = "WARNING"  # Less noise in tests
-    
+    config.security.state_directory = tempfile.mkdtemp(prefix="ghoststream_state_")
+
     set_config(config)
-    
+
     yield config
-    
+
     # Cleanup temp directory
     if Path(config.transcoding.temp_directory).exists():
         shutil.rmtree(config.transcoding.temp_directory, ignore_errors=True)
+    if Path(config.security.state_directory).exists():
+        shutil.rmtree(config.security.state_directory, ignore_errors=True)
 
 
 @pytest.fixture(scope="module")
-def api_client(test_config) -> Generator[TestClient, None, None]:
+def api_client(test_config) -> Generator[GhostStreamTestClient, None, None]:
     """
-    Test client for API endpoints.
-    Auto-cleanup on teardown.
+    Live HTTP/WebSocket client bound to the real GhostStream runtime.
     """
-    app = create_app()
     runtime = create_runtime()
+    stop_event = threading.Event()
+    runtime_errors = []
 
-    @app.on_event("startup")
-    async def _startup_runtime() -> None:
-        await runtime.start()
+    def _runtime_thread() -> None:
+        import gevent
 
-    @app.on_event("shutdown")
-    async def _shutdown_runtime() -> None:
-        await runtime.stop()
+        try:
+            runtime.start()
+            while not stop_event.is_set():
+                gevent.sleep(0.1)
+        except Exception as exc:
+            runtime_errors.append(exc)
+        finally:
+            try:
+                runtime.stop()
+            except Exception as exc:
+                runtime_errors.append(exc)
 
-    with TestClient(app) as client:
+    thread = threading.Thread(
+        target=_runtime_thread,
+        daemon=True,
+        name="ghoststream-test-runtime",
+    )
+    thread.start()
+
+    base_url = f"http://{test_config.server.host}:{test_config.server.port}"
+    client = GhostStreamTestClient(base_url)
+
+    deadline = time.time() + 5.0
+    while True:
+        if runtime_errors:
+            client.close()
+            raise RuntimeError("GhostStream test runtime failed to start") from runtime_errors[0]
+
+        try:
+            response = client.get("/api/health")
+            if response.status_code == 200:
+                break
+        except Exception:
+            pass
+
+        if time.time() >= deadline:
+            stop_event.set()
+            thread.join(timeout=2.0)
+            client.close()
+            raise RuntimeError("GhostStream test runtime did not become ready in time")
+        time.sleep(0.1)
+
+    try:
         yield client
+    finally:
+        stop_event.set()
+        thread.join(timeout=5.0)
+        client.close()
 
 
 @pytest.fixture

@@ -27,6 +27,7 @@ class GhostStreamService:
         self.zeroconf: Optional[Zeroconf] = None
         self.service_info: Optional[ServiceInfo] = None
         self._udp_running = False
+        self._udp_thread: Optional[threading.Thread] = None
         
     def _get_local_ip(self) -> str:
         """Get the local IP address."""
@@ -103,6 +104,10 @@ class GhostStreamService:
     
     def stop(self) -> None:
         """Stop advertising the service."""
+        self._udp_running = False
+        if self._udp_thread and self._udp_thread.is_alive():
+            self._udp_thread.join(timeout=2.0)
+
         if self.zeroconf and self.service_info:
             try:
                 self.zeroconf.unregister_service(self.service_info)
@@ -114,12 +119,17 @@ class GhostStreamService:
         self.zeroconf = None
         self.service_info = None
         self._udp_running = False
+        self._udp_thread = None
     
     def start_udp_responder(self) -> None:
         """Start UDP broadcast responder for discovery fallback."""
         self._udp_running = True
-        thread = threading.Thread(target=self._udp_responder_loop, daemon=True)
-        thread.start()
+        self._udp_thread = threading.Thread(
+            target=self._udp_responder_loop,
+            daemon=True,
+            name="GhostStreamUDPResponder",
+        )
+        self._udp_thread.start()
         logger.info(f"[Discovery] UDP responder started on port 8766")
     
     def _udp_responder_loop(self) -> None:

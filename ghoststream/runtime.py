@@ -115,8 +115,10 @@ class RegistrationServiceRuntime(Service):
         )
 
     def on_start(self) -> None:
+        import os
         config = get_config()
-        if not config.ghosthub.url or not config.ghosthub.auto_register:
+        ghosthub_url = os.environ.get("GHOSTHUB_URL") or config.ghosthub.url
+        if not ghosthub_url or not config.ghosthub.auto_register:
             return
         import gevent
         gevent.spawn(
@@ -157,21 +159,21 @@ class GhostStreamApplication:
         self.registration_service = RegistrationServiceRuntime(self.base_url)
         self.ingress = NetworkIngressController()
 
-        self.manager.register(self.websocket_service)
-        self.manager.register(self.job_service)
-        self.manager.register(self.discovery_service)
-        self.manager.register(self.registration_service)
-        self.manager.register(self.ingress)
+        self.manager.register_service(self.websocket_service)
+        self.manager.register_service(self.job_service)
+        self.manager.register_service(self.discovery_service)
+        self.manager.register_service(self.registration_service)
+        self.manager.register_service(self.ingress)
 
     def start(self) -> None:
         self.started_at = time.time()
         Path(get_config().transcoding.temp_directory).mkdir(parents=True, exist_ok=True)
         set_runtime(self)
-        self.manager.start()
+        self.manager.boot()
 
     def stop(self) -> None:
         try:
-            self.manager.stop()
+            self.manager.shutdown()
         finally:
             set_runtime(None)
 

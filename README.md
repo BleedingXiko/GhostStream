@@ -18,17 +18,28 @@ GhostStream is a hardware-accelerated video transcoding server with automatic GP
 | Linux | [GhostStream-Linux](https://github.com/BleedingXiko/GhostStream/releases/latest) | `chmod +x && ./GhostStream-Linux` |
 | macOS | [GhostStream-macOS](https://github.com/BleedingXiko/GhostStream/releases/latest) | `chmod +x && ./GhostStream-macOS` |
 
-Requires FFmpeg. The application will provide installation instructions if FFmpeg is not found.
+Requires FFmpeg. On startup, GhostStream launches the Textual dashboard by default and will show install instructions if FFmpeg is missing.
 
 ### From Source
 
 ```bash
 git clone https://github.com/BleedingXiko/GhostStream.git
 cd GhostStream
+git submodule update --init --recursive
 python run.py
 ```
 
-The launcher creates a virtual environment, installs dependencies, and starts the server.
+The launcher creates a virtual environment, installs dependencies, starts the embedded GhostStream engine, and opens the TUI dashboard.
+
+### Headless / Containers
+
+Use `--server-only` when you want the API/HLS engine without the dashboard:
+
+```bash
+python -m ghoststream --server-only
+```
+
+That mode is ideal for Docker, CI smoke tests, SSH sessions, and other environments where a terminal UI is not practical.
 
 ## SDK Installation
 
@@ -52,13 +63,8 @@ from ghoststream import GhostStreamClient, TranscodeStatus
 client = GhostStreamClient(manual_server="localhost:8765")
 
 # Synchronous (Flask/gevent compatible)
-job = client.transcode_sync(source="https://example.com/video.mp4", resolution="720p")
+job = client.transcode(source="https://example.com/video.mp4", resolution="720p")
 print(f"Stream URL: {job.stream_url}")
-
-# Or async
-async with GhostStreamClient(manual_server="localhost:8765") as client:
-    job = await client.transcode(source="https://example.com/video.mp4")
-    print(f"Stream URL: {job.stream_url}")
 ```
 
 **JavaScript/TypeScript:**
@@ -235,29 +241,44 @@ client.start_discovery()
 client = GhostStreamClient(manual_server="192.168.1.100:8765")
 
 # Synchronous API (Flask/gevent compatible)
-job = client.transcode_sync(
+job = client.transcode(
     source="http://pi:5000/media/video.mkv",
     resolution="1080p"
 )
 if job.status != TranscodeStatus.ERROR:
     print(job.stream_url)
-
-# Async API
-job = await client.transcode(source="http://pi:5000/media/video.mkv")
 ```
 
-### WebSocket Progress
+### Progress Updates
 
 ```python
-# Subscribe to job updates
-ws.send({"type": "subscribe", "job_ids": ["job-123"]})
+# Python SDK: poll synchronously
+job = client.get_job_status("job-123")
+print(job.progress, job.status.value)
+```
 
-# Receive real-time progress
+```json
+// Browser / JS clients can use /ws/progress directly
+{"type": "subscribe", "job_ids": ["job-123"], "control_token": "token-from-start-response"}
+
 {"type": "progress", "job_id": "job-123", "data": {"progress": 45.2}}
 {"type": "status_change", "job_id": "job-123", "data": {"status": "ready"}}
 ```
 
 ## Contributing
+
+After cloning, initialize the Specter submodule before running the server or tests:
+
+```bash
+git submodule update --init --recursive
+```
+
+The `ghoststream/specter` directory is sourced from [BleedingXiko/SPECTER](https://github.com/BleedingXiko/SPECTER). If you need to make changes inside the submodule:
+
+1. Commit and push from within `ghoststream/specter`.
+2. Return to the GhostStream repo and commit the updated submodule pointer.
+
+That keeps GhostStream pinned to an explicit Specter revision while still letting contributors iterate on both projects.
 
 Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 

@@ -3,104 +3,61 @@ name: Build Release Executables
 on:
   release:
     types: [created]
-  workflow_dispatch:  # Allow manual trigger
+  workflow_dispatch:
 
 jobs:
-  build-windows:
-    runs-on: windows-latest
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: Windows-x64
+            artifact: GhostStream.exe
+            rename: GhostStream-Windows-x64.exe
+          - os: ubuntu-22.04
+            name: Linux-x64
+            artifact: GhostStream
+            rename: GhostStream-Linux-x86_64
+          - os: macos-13
+            name: macOS-x64
+            artifact: GhostStream
+            rename: GhostStream-macOS-x64
+          - os: macos-latest
+            name: macOS-ARM64
+            artifact: GhostStream
+            rename: GhostStream-macOS-ARM64
+
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
-          
-      - name: Build executable
-        run: python build_ghoststream.py
-          
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: GhostStream-Windows
-          path: dist/GhostStream.exe
-          
-      - name: Upload to release
-        if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v1
-        with:
-          files: dist/GhostStream.exe
 
-  build-linux:
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
-          
       - name: Build executable
         run: python build_ghoststream.py
-          
-      - name: Rename for platform
-        run: mv dist/GhostStream dist/GhostStream-Linux-x86_64
-          
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: GhostStream-Linux
-          path: dist/GhostStream-Linux-x86_64
-          
-      - name: Upload to release
-        if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v1
-        with:
-          files: dist/GhostStream-Linux-x86_64
 
-  build-macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
-          
-      - name: Build executable
-        run: python build_ghoststream.py
-          
       - name: Rename for platform
-        run: mv dist/GhostStream dist/GhostStream-macOS
-          
+        run: |
+          mv dist/${{ matrix.artifact }} dist/${{ matrix.rename }}
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: GhostStream-macOS
-          path: dist/GhostStream-macOS
-          
+          name: GhostStream-${{ matrix.name }}
+          path: dist/${{ matrix.rename }}
+
       - name: Upload to release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v1
         with:
-          files: dist/GhostStream-macOS
+          files: dist/${{ matrix.rename }}

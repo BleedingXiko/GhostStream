@@ -19,6 +19,7 @@ from .. import __version__
 from ..config import get_config
 from ..hardware import get_capabilities
 from ..jobs import get_job_manager
+from .websocket import get_websocket_manager
 from ..models import (
     CapabilitiesResponse,
     HealthResponse,
@@ -26,7 +27,7 @@ from ..models import (
     StatsResponse,
     TranscodeRequest,
 )
-from ..runtime import get_runtime
+
 from .security import (
     append_token_to_playlist,
     require_control_capability,
@@ -43,6 +44,7 @@ PLAYLIST_STALE_THRESHOLD = 30.0
 # ---------------------------------------------------------------------------
 
 def _get_start_time() -> float:
+    from ..runtime import get_runtime
     runtime = get_runtime()
     if runtime is not None:
         return runtime.started_at
@@ -279,6 +281,10 @@ def get_shared_streams():
     return jsonify(job_manager.get_shared_stream_stats())
 
 
+def get_ws_clients():
+    return jsonify(get_websocket_manager().get_clients())
+
+
 def leave_stream(job_id: str):
     job_manager = get_job_manager()
     require_control_capability(job_id)
@@ -497,6 +503,15 @@ def register_routes(app: Flask) -> None:
 
     # Shared streams
     app.add_url_rule("/api/streams/shared", "get_shared_streams", get_shared_streams, methods=["GET"])
+
+    # Connected WebSocket clients
+    app.add_url_rule("/api/clients", "get_ws_clients", get_ws_clients, methods=["GET"])
+
+    @app.before_request
+    def _track_http_client():
+        name = request.headers.get("X-GhostStream-Client")
+        if name:
+            get_websocket_manager().seen_http_client(name)
 
     # Stream / HLS serving
     app.add_url_rule("/stream/<job_id>/<path:filename>", "stream_file", stream_file, methods=["GET"])

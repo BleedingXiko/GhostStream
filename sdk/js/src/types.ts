@@ -10,6 +10,21 @@ export enum TranscodeStatus {
 }
 
 /**
+ * Subtitle track information
+ */
+export interface SubtitleTrack {
+  /** URL to the WebVTT subtitle file */
+  url: string;
+  /** Display label for the track (e.g. 'English') */
+  label?: string;
+  /** ISO 639-1 language code (e.g. 'en') */
+  language?: string;
+  /** Whether this track is the default */
+  default?: boolean;
+}
+
+
+/**
  * Transcode job information
  */
 export interface TranscodeJob {
@@ -26,6 +41,13 @@ export interface TranscodeJob {
   errorMessage?: string;
   createdAt?: string;
   startedAt?: string;
+  completedAt?: string;
+  startTime?: number;
+  isShared?: boolean;
+  viewerCount?: number;
+  variants?: Array<Record<string, unknown>>;
+  mediaInfo?: Record<string, unknown>;
+  subtitles?: SubtitleTrack[];
 }
 
 /**
@@ -54,6 +76,8 @@ export interface TranscodeOptions {
   toneMap?: boolean;
   /** Two-pass encoding (batch mode only) */
   twoPass?: boolean;
+  /** Optional subtitle tracks */
+  subtitles?: SubtitleTrack[];
 }
 
 /**
@@ -66,6 +90,8 @@ export interface ClientConfig {
   retries?: number;
   /** Retry delay in milliseconds */
   retryDelay?: number;
+  /** Client name sent to the server on WebSocket connect (e.g. 'GhostHub') */
+  clientName?: string;
 }
 
 /**

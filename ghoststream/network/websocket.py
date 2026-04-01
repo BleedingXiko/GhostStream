@@ -36,6 +36,7 @@ class WebSocketConnection:
     id: str
     ws: Any  # gevent-websocket WebSocket object
     state: ConnectionState = ConnectionState.CONNECTING
+    client_name: Optional[str] = None
     subscribed_jobs: Set[str] = field(default_factory=set)
     authorized_jobs: Set[str] = field(default_factory=set)
     subscribe_all: bool = False
@@ -59,8 +60,11 @@ class WebSocketManager:
     MAX_MISSED_PONGS = 3
     QUEUE_FULL_STRATEGY = "drop_oldest"
 
+    HTTP_CLIENT_TTL = 300.0  # seconds before an HTTP client is considered gone
+
     def __init__(self):
         self._connections: Dict[str, WebSocketConnection] = {}
+        self._http_clients: Dict[str, float] = {}  # client_name -> last_seen
         self._lock = gevent.lock.BoundedSemaphore(1)
         self._shutdown_event = gevent.event.Event()
         self._heartbeat_greenlet: Optional[gevent.Greenlet] = None
@@ -182,7 +186,11 @@ class WebSocketManager:
             message = json.loads(data)
             msg_type = message.get("type", "")
 
-            if msg_type == "ping":
+            if msg_type == "identify":
+                conn.client_name = message.get("client") or "Unknown"
+                logger.info(f"[WS:{conn.id}] Identified as '{conn.client_name}'")
+
+            elif msg_type == "ping":
                 self.queue_message(conn, {"type": "pong", "ts": time.time()})
 
             elif msg_type == "pong":
@@ -276,6 +284,7 @@ class WebSocketManager:
             "connections": [
                 {
                     "id": c.id,
+                    "client_name": c.client_name,
                     "age_seconds": now - c.created_at,
                     "subscribed_jobs": len(c.subscribed_jobs),
                     "subscribe_all": c.subscribe_all,
@@ -284,6 +293,24 @@ class WebSocketManager:
                 for c in self._connections.values()
             ],
         }
+
+    def seen_http_client(self, client_name: str) -> None:
+        self._http_clients[client_name] = time.time()
+
+    def get_clients(self) -> list:
+        now = time.time()
+        clients = [
+            {"id": c.id, "client": c.client_name or "Unknown", "transport": "ws"}
+            for c in self._connections.values()
+            if c.state == ConnectionState.CONNECTED
+        ]
+        ws_names = {c["client"] for c in clients}
+        for name, last_seen in list(self._http_clients.items()):
+            if now - last_seen > self.HTTP_CLIENT_TTL:
+                del self._http_clients[name]
+            elif name not in ws_names:
+                clients.append({"id": None, "client": name, "transport": "http"})
+        return clients
 
 
 # ---------------------------------------------------------------------------

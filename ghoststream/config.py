@@ -3,6 +3,7 @@ Configuration management for GhostStream
 """
 
 import os
+import sys
 import yaml
 from pathlib import Path
 from typing import Optional, List
@@ -64,7 +65,7 @@ class HardwareConfig(BaseModel):
     nvenc_preset: str = "p4"
     qsv_preset: str = "medium"
     videotoolbox_preset: str = "medium"
-    vaapi_device: str = "/dev/dri/renderD128"
+    vaapi_device: str = "auto"
 
 
 class LimitsConfig(BaseModel):
@@ -101,32 +102,72 @@ class GhostStreamConfig(BaseModel):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
 
+def _iter_config_search_paths():
+    """Yield candidate configuration paths in precedence order."""
+    cwd = Path.cwd()
+    candidates = [
+        cwd / "ghoststream.yaml",
+        cwd / "ghoststream.yml",
+        cwd / "config" / "ghoststream.yaml",
+        cwd / "config" / "ghoststream.yml",
+    ]
+
+    if getattr(sys, "frozen", False):
+        executable_dir = Path(sys.executable).resolve().parent
+        candidates.extend(
+            [
+                executable_dir / "ghoststream.yaml",
+                executable_dir / "ghoststream.yml",
+            ]
+        )
+
+        bundle_root = getattr(sys, "_MEIPASS", None)
+        if bundle_root:
+            bundle_path = Path(bundle_root)
+            candidates.extend(
+                [
+                    bundle_path / "ghoststream.yaml",
+                    bundle_path / "ghoststream.yml",
+                ]
+            )
+
+    candidates.extend(
+        [
+            Path.home() / ".config" / "ghoststream" / "ghoststream.yaml",
+            Path.home() / ".config" / "ghoststream" / "ghoststream.yml",
+            Path("/etc/ghoststream/ghoststream.yaml"),
+            Path("/etc/ghoststream/ghoststream.yml"),
+            Path(__file__).resolve().parent.parent / "ghoststream.yaml",
+            Path(__file__).resolve().parent.parent / "ghoststream.yml",
+        ]
+    )
+
+    seen = set()
+    for path in candidates:
+        if path in seen:
+            continue
+        seen.add(path)
+        yield path
+
+
 def find_config_file() -> Optional[Path]:
     """Find the configuration file in standard locations."""
-    search_paths = [
-        Path.cwd() / "ghoststream.yaml",
-        Path.cwd() / "ghoststream.yml",
-        Path.cwd() / "config" / "ghoststream.yaml",
-        Path.home() / ".config" / "ghoststream" / "ghoststream.yaml",
-        Path("/etc/ghoststream/ghoststream.yaml"),
-    ]
-    
-    for path in search_paths:
+    for path in _iter_config_search_paths():
         if path.exists():
             return path
-    
+
     return None
 
 
 def load_config(config_path: Optional[str] = None) -> GhostStreamConfig:
     """Load configuration from YAML file or use defaults."""
     config_file = Path(config_path) if config_path else find_config_file()
-    
+
     if config_file and config_file.exists():
-        with open(config_file, "r") as f:
+        with open(config_file, "r", encoding="utf-8") as f:
             yaml_data = yaml.safe_load(f) or {}
         return GhostStreamConfig(**yaml_data)
-    
+
     return GhostStreamConfig()
 
 

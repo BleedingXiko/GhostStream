@@ -5,6 +5,7 @@ Handles hardware acceleration detection and fallback.
 
 import logging
 import time
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from ..models import VideoCodec, AudioCodec, HWAccel
@@ -241,7 +242,7 @@ class EncoderSelector:
     def get_hw_decode_args(
         self,
         video_encoder: str,
-        vaapi_device: str = "/dev/dri/renderD128"
+        vaapi_device: str = "auto"
     ) -> Tuple[List[str], str | None]:
         """Get hardware decoding arguments based on encoder."""
         if "nvenc" in video_encoder:
@@ -249,6 +250,13 @@ class EncoderSelector:
         elif "qsv" in video_encoder:
             return ["-hwaccel", "qsv", "-hwaccel_output_format", "qsv"], "qsv"
         elif "vaapi" in video_encoder:
+            if vaapi_device == "auto":
+                for device in sorted(Path("/dev/dri").glob("renderD*")):
+                    if device.exists():
+                        vaapi_device = str(device)
+                        break
+                else:
+                    return [], None
             return [
                 "-hwaccel", "vaapi",
                 "-hwaccel_device", vaapi_device,

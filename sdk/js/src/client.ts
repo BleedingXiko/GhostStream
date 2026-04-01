@@ -5,7 +5,8 @@ import {
   ClientConfig,
   Capabilities,
   HealthStatus,
-  ProgressEvent
+  ProgressEvent,
+  SubtitleTrack
 } from './types';
 
 /**
@@ -57,7 +58,8 @@ export class GhostStreamClient {
     this.config = {
       timeout: config.timeout ?? 30000,
       retries: config.retries ?? 3,
-      retryDelay: config.retryDelay ?? 1000
+      retryDelay: config.retryDelay ?? 1000,
+      clientName: config.clientName
     };
   }
 
@@ -116,7 +118,7 @@ export class GhostStreamClient {
    * Convert snake_case API response to camelCase
    */
   private toTranscodeJob(data: Record<string, unknown>): TranscodeJob {
-    const job = {
+    const job: TranscodeJob = {
       jobId: data.job_id as string,
       status: data.status as TranscodeStatus,
       progress: (data.progress as number) ?? 0,
@@ -129,7 +131,14 @@ export class GhostStreamClient {
       hwAccelUsed: data.hw_accel_used as string | undefined,
       errorMessage: data.error_message as string | undefined,
       createdAt: data.created_at as string | undefined,
-      startedAt: data.started_at as string | undefined
+      startedAt: data.started_at as string | undefined,
+      completedAt: data.completed_at as string | undefined,
+      startTime: data.start_time as number | undefined,
+      isShared: data.is_shared as boolean | undefined,
+      viewerCount: data.viewer_count as number | undefined,
+      variants: data.variants as Array<Record<string, unknown>> | undefined,
+      mediaInfo: data.media_info as Record<string, unknown> | undefined,
+      subtitles: data.subtitles as SubtitleTrack[] | undefined
     };
     if (job.controlToken) {
       this.controlTokens.set(job.jobId, job.controlToken);
@@ -148,15 +157,40 @@ export class GhostStreamClient {
    * Check if the server is healthy
    */
   async healthCheck(): Promise<boolean> {
-    const result = await this.request<HealthStatus>('GET', '/api/health');
+    const result = await this.getHealth();
     return result?.status === 'healthy';
+  }
+
+  /**
+   * Get full health status with uptime, job counts, etc.
+   */
+  async getHealth(): Promise<HealthStatus | null> {
+    const data = await this.request<Record<string, unknown>>('GET', '/api/health');
+    if (!data) return null;
+    return {
+      status: data.status as string,
+      version: data.version as string,
+      uptimeSeconds: (data.uptime_seconds ?? data.uptimeSeconds) as number,
+      currentJobs: (data.current_jobs ?? data.currentJobs) as number,
+      queuedJobs: (data.queued_jobs ?? data.queuedJobs) as number,
+    };
   }
 
   /**
    * Get server capabilities (codecs, hardware, etc.)
    */
   async getCapabilities(): Promise<Capabilities | null> {
-    return await this.request<Capabilities>('GET', '/api/capabilities');
+    const data = await this.request<Record<string, unknown>>('GET', '/api/capabilities');
+    if (!data) return null;
+    return {
+      hwAccels: (data.hw_accels ?? data.hwAccels) as Capabilities['hwAccels'],
+      videoCodecs: (data.video_codecs ?? data.videoCodecs) as string[],
+      audioCodecs: (data.audio_codecs ?? data.audioCodecs) as string[],
+      formats: data.formats as string[],
+      maxConcurrentJobs: (data.max_concurrent_jobs ?? data.maxConcurrentJobs) as number,
+      ffmpegVersion: (data.ffmpeg_version ?? data.ffmpegVersion) as string,
+      platform: data.platform as string,
+    };
   }
 
   // ==================== Transcoding ====================
@@ -178,7 +212,8 @@ export class GhostStreamClient {
         hw_accel: options.hwAccel ?? 'auto',
         tone_map: options.toneMap ?? true,
         two_pass: options.twoPass ?? false
-      }
+      },
+      subtitles: options.subtitles
     };
 
     const result = await this.request<Record<string, unknown>>(
@@ -311,6 +346,9 @@ export class GhostStreamClient {
     let closed = false;
 
     ws.onopen = () => {
+      if (this.config.clientName) {
+        ws.send(JSON.stringify({ type: 'identify', client: this.config.clientName }));
+      }
       const jobTokens = Object.fromEntries(
         jobIds
           .map((jobId) => [jobId, this.controlTokens.get(jobId)])

@@ -1,42 +1,36 @@
 """
 GhostStream Client - For GhostHub and other media servers to discover and use GhostStream
 
+Pure Specter-native: gevent + Flask. No asyncio, no threading primitives.
+
 Usage in GhostHub:
     from ghoststream.client import GhostStreamClient
-    
+
     client = GhostStreamClient()
     client.start_discovery()
-    
-    # Check if transcoder is available
+
     if client.is_available():
-        # Request transcoding
-        stream_url = await client.transcode(
+        job = client.transcode(
             source="http://pi-ip:5000/media/video.mkv",
             resolution="1080p"
         )
-        # Use stream_url in your video player
+        # Use job.stream_url in your video player
 """
 
-import asyncio
 import logging
 import random
-import time
-import json
-import threading
-from typing import Optional, Dict, Any, List, Callable, AsyncIterator
+import socket
+from typing import Optional, Dict, Any, List, Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from contextlib import asynccontextmanager
+
+import gevent
+import gevent.lock
+import gevent.pool
+from gevent import sleep as gevent_sleep
 
 import httpx
 from zeroconf import ServiceBrowser, ServiceListener, Zeroconf
-import socket
-
-try:
-    import websockets
-    HAS_WEBSOCKETS = True
-except ImportError:
-    HAS_WEBSOCKETS = False
 
 logger = logging.getLogger(__name__)
 
@@ -55,10 +49,10 @@ DEFAULT_RETRY_MULTIPLIER = 2.0
 
 class LoadBalanceStrategy(str, Enum):
     """Load balancing strategies for multiple servers."""
-    ROUND_ROBIN = "round_robin"      # Rotate through servers
-    LEAST_BUSY = "least_busy"        # Pick server with fewest active jobs
-    FASTEST = "fastest"              # Pick server with best HW accel
-    RANDOM = "random"                # Random selection
+    ROUND_ROBIN = "round_robin"
+    LEAST_BUSY = "least_busy"
+    FASTEST = "fastest"
+    RANDOM = "random"
 
 
 @dataclass
@@ -81,20 +75,19 @@ class GhostStreamServer:
     hw_accels: List[str] = None
     video_codecs: List[str] = None
     max_jobs: int = 2
-    
+
     def __post_init__(self):
         if self.hw_accels is None:
             self.hw_accels = []
         if self.video_codecs is None:
             self.video_codecs = []
-    
+
     @property
     def base_url(self) -> str:
         return f"http://{self.host}:{self.port}"
-    
+
     @property
     def has_hw_accel(self) -> bool:
-        """Check if hardware acceleration is available."""
         return any(hw != "software" for hw in self.hw_accels)
 
 
@@ -117,17 +110,29 @@ class TranscodeJob:
     control_token: Optional[str] = None
     error_message: Optional[str] = None
     hw_accel_used: Optional[str] = None
+    duration: Optional[float] = None
+    current_time: Optional[float] = None
+    eta_seconds: Optional[int] = None
+    created_at: Optional[str] = None
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    start_time: float = 0
+    is_shared: bool = False
+    viewer_count: int = 1
+    variants: Optional[List[Dict[str, Any]]] = None
+    media_info: Optional[Dict[str, Any]] = None
+    subtitles: Optional[List[Dict[str, Any]]] = None
 
 
 class GhostStreamDiscoveryListener(ServiceListener):
     """Listens for GhostStream services on the network."""
-    
+
     SERVICE_TYPE = "_ghoststream._tcp.local."
-    
+
     def __init__(self, on_found: Callable, on_removed: Callable):
         self.on_found = on_found
         self.on_removed = on_removed
-    
+
     def add_service(self, zc: Zeroconf, type_: str, name: str) -> None:
         logger.info(f"[mDNS] Discovered service: {name}")
         info = zc.get_service_info(type_, name)
@@ -139,7 +144,6 @@ class GhostStreamDiscoveryListener(ServiceListener):
                     k.decode(): v.decode() if isinstance(v, bytes) else v
                     for k, v in info.properties.items()
                 }
-                
                 server = GhostStreamServer(
                     name=name,
                     host=addresses[0],
@@ -149,29 +153,24 @@ class GhostStreamDiscoveryListener(ServiceListener):
                     video_codecs=props.get("video_codecs", "").split(","),
                     max_jobs=int(props.get("max_jobs", 2))
                 )
-                
                 logger.info(f"[mDNS] GhostStream server found: {server.host}:{server.port} (hw_accel: {server.has_hw_accel})")
                 self.on_found(server)
             else:
                 logger.warning(f"[mDNS] Service {name} has no addresses")
         else:
             logger.warning(f"[mDNS] Could not get service info for {name}")
-    
+
     def remove_service(self, zc: Zeroconf, type_: str, name: str) -> None:
         logger.info(f"GhostStream removed: {name}")
         self.on_removed(name)
-    
+
     def update_service(self, zc: Zeroconf, type_: str, name: str) -> None:
         self.add_service(zc, type_, name)
 
 
 @dataclass
 class ClientConfig:
-    """
-    Configuration for GhostStreamClient.
-    
-    All parameters are optional with sensible defaults for backward compatibility.
-    """
+    """Configuration for GhostStreamClient."""
     connect_timeout: float = DEFAULT_CONNECT_TIMEOUT
     read_timeout: float = DEFAULT_READ_TIMEOUT
     write_timeout: float = DEFAULT_WRITE_TIMEOUT
@@ -180,38 +179,25 @@ class ClientConfig:
     retry_max_delay: float = DEFAULT_RETRY_MAX_DELAY
     retry_multiplier: float = DEFAULT_RETRY_MULTIPLIER
     retry_on_status: List[int] = field(default_factory=lambda: [502, 503, 504])
+    client_name: Optional[str] = None
+    max_connections: int = 20
+    max_keepalive_connections: int = 10
+    max_inflight_requests: int = 20
 
 
 class GhostStreamClient:
     """
     Client for discovering and using GhostStream transcoding services.
-    
-    Designed for integration with GhostHub and other media servers.
-    
-    Features:
-    - Connection pooling for efficient HTTP requests
-    - Automatic retry with exponential backoff
-    - WebSocket support for real-time progress updates
-    - ABR (Adaptive Bitrate) streaming mode
-    - Context manager support for proper cleanup
-    
-    Backward Compatible: All existing code will work without changes.
+
+    Pure Specter-native: all locking via gevent.lock.BoundedSemaphore,
+    all sleeping via gevent.sleep. No asyncio, no threading primitives.
     """
-    
+
     def __init__(
         self,
         manual_server: Optional[str] = None,
         config: Optional[ClientConfig] = None
     ):
-        """
-        Initialize the client.
-        
-        Args:
-            manual_server: Optional manual server address (e.g., "192.168.4.2:8765")
-                          If provided, skips mDNS discovery.
-            config: Optional configuration for timeouts and retries.
-                   If not provided, uses sensible defaults.
-        """
         self.config = config or ClientConfig()
         self.servers: Dict[str, GhostStreamServer] = {}
         self.preferred_server: Optional[str] = None
@@ -220,16 +206,16 @@ class GhostStreamClient:
         self._discovery_started = False
         self._callbacks: List[Callable[[str, GhostStreamServer], None]] = []
         self._control_tokens: Dict[str, str] = {}
-        
-        # Connection pool - reused across requests
-        self._http_client: Optional[httpx.AsyncClient] = None
-        self._client_lock = asyncio.Lock()
-        
-        # Synchronous HTTP client (for gevent/Flask compatibility)
-        self._sync_http_client: Optional[httpx.Client] = None
-        self._sync_client_lock = threading.Lock()
-        
-        # If manual server provided, add it directly
+        self._job_slot_modes: Dict[str, str] = {}
+
+        # One-at-a-time HTTP client access via gevent semaphore
+        self._http_client: Optional[httpx.Client] = None
+        self._client_lock = gevent.lock.BoundedSemaphore(1)
+        self._request_slots = gevent.lock.BoundedSemaphore(
+            max(1, self.config.max_inflight_requests)
+        )
+        self._job_limiters: Dict[str, gevent.lock.BoundedSemaphore] = {}
+
         if manual_server:
             host, port = manual_server.split(":")
             self.servers["manual"] = GhostStreamServer(
@@ -238,54 +224,41 @@ class GhostStreamClient:
                 port=int(port)
             )
             self.preferred_server = "manual"
+            self._ensure_job_limiter(self.servers["manual"])
+
+    # =========================================================================
+    # Control token helpers
+    # =========================================================================
 
     def _token_key(self, server: GhostStreamServer, job_id: str) -> str:
         return f"{server.base_url}|{job_id}"
 
-    def _store_control_token(
-        self,
-        server: Optional[GhostStreamServer],
-        job_id: Optional[str],
-        control_token: Optional[str],
-    ) -> None:
+    def _store_control_token(self, server, job_id, control_token) -> None:
         if not server or not job_id or not control_token:
             return
         self._control_tokens[self._token_key(server, job_id)] = control_token
 
-    def _get_control_token(
-        self,
-        server: Optional[GhostStreamServer],
-        job_id: str,
-    ) -> Optional[str]:
+    def _get_control_token(self, server, job_id: str) -> Optional[str]:
         if not server:
             return None
         return self._control_tokens.get(self._token_key(server, job_id))
 
-    def _drop_control_token(
-        self,
-        server: Optional[GhostStreamServer],
-        job_id: str,
-    ) -> None:
+    def _drop_control_token(self, server, job_id: str) -> None:
         if not server:
             return
         self._control_tokens.pop(self._token_key(server, job_id), None)
 
     def _drop_server_tokens(self, server: GhostStreamServer) -> None:
         prefix = f"{server.base_url}|"
-        for key in [key for key in self._control_tokens if key.startswith(prefix)]:
+        for key in [k for k in self._control_tokens if k.startswith(prefix)]:
             self._control_tokens.pop(key, None)
+            self._job_slot_modes.pop(key, None)
 
-    def _auth_headers(self, server: Optional[GhostStreamServer], job_id: str) -> Dict[str, str]:
+    def _auth_headers(self, server, job_id: str) -> Dict[str, str]:
         token = self._get_control_token(server, job_id)
-        if not token:
-            return {}
-        return {"X-GhostStream-Control-Token": token}
+        return {"X-GhostStream-Control-Token": token} if token else {}
 
-    def _job_from_payload(
-        self,
-        data: Dict[str, Any],
-        server: Optional[GhostStreamServer],
-    ) -> TranscodeJob:
+    def _job_from_payload(self, data: Dict[str, Any], server) -> TranscodeJob:
         job = TranscodeJob(
             job_id=data["job_id"],
             status=TranscodeStatus(data["status"]),
@@ -295,13 +268,57 @@ class GhostStreamClient:
             control_token=data.get("control_token"),
             error_message=data.get("error_message"),
             hw_accel_used=data.get("hw_accel_used"),
+            duration=data.get("duration"),
+            current_time=data.get("current_time"),
+            eta_seconds=data.get("eta_seconds"),
+            created_at=str(data["created_at"]) if data.get("created_at") else None,
+            started_at=str(data["started_at"]) if data.get("started_at") else None,
+            completed_at=str(data["completed_at"]) if data.get("completed_at") else None,
+            start_time=data.get("start_time", 0),
+            is_shared=data.get("is_shared", False),
+            viewer_count=data.get("viewer_count", 1),
+            variants=data.get("variants"),
+            media_info=data.get("media_info"),
+            subtitles=data.get("subtitles"),
         )
         self._store_control_token(server, job.job_id, job.control_token)
         return job
-    
-    async def _get_client(self) -> httpx.AsyncClient:
-        """Get or create the shared HTTP client (connection pooling)."""
-        async with self._client_lock:
+
+    # =========================================================================
+    # HTTP client (gevent-safe connection pool)
+    # =========================================================================
+
+    def _ensure_job_limiter(self, server: GhostStreamServer) -> gevent.lock.BoundedSemaphore:
+        limiter = self._job_limiters.get(server.name)
+        if limiter is None:
+            limiter = gevent.lock.BoundedSemaphore(max(1, server.max_jobs))
+            self._job_limiters[server.name] = limiter
+        return limiter
+
+    def _reserve_job_slot(self, server: GhostStreamServer) -> None:
+        self._ensure_job_limiter(server).acquire()
+
+    def _release_job_slot(self, server: Optional[GhostStreamServer], job_id: str) -> None:
+        if not server:
+            return
+        key = self._token_key(server, job_id)
+        if key not in self._job_slot_modes:
+            return
+        limiter = self._job_limiters.get(server.name)
+        self._job_slot_modes.pop(key, None)
+        if limiter is not None:
+            try:
+                limiter.release()
+            except ValueError:
+                logger.debug(
+                    "[GhostStream] Ignored extra job-slot release for %s on %s",
+                    job_id,
+                    server.name,
+                )
+
+    def _get_client(self) -> httpx.Client:
+        """Get or create the shared HTTP client. Protected by BoundedSemaphore."""
+        with self._client_lock:
             if self._http_client is None or self._http_client.is_closed:
                 timeout = httpx.Timeout(
                     connect=self.config.connect_timeout,
@@ -309,87 +326,60 @@ class GhostStreamClient:
                     write=self.config.write_timeout,
                     pool=self.config.connect_timeout
                 )
-                self._http_client = httpx.AsyncClient(
+                self._http_client = httpx.Client(
                     timeout=timeout,
-                    limits=httpx.Limits(max_connections=100, max_keepalive_connections=20)
+                    limits=httpx.Limits(
+                        max_connections=max(1, self.config.max_connections),
+                        max_keepalive_connections=max(1, self.config.max_keepalive_connections),
+                    )
                 )
             return self._http_client
-    
-    async def close(self) -> None:
-        """Close the HTTP client and release resources."""
-        async with self._client_lock:
+
+    def close(self) -> None:
+        """Close the HTTP client and stop discovery."""
+        with self._client_lock:
             if self._http_client and not self._http_client.is_closed:
-                await self._http_client.aclose()
+                self._http_client.close()
                 self._http_client = None
-        self.close_sync()
         self.stop_discovery()
-    
-    # =========================================================================
-    # Synchronous API (for gevent/Flask compatibility)
-    # =========================================================================
-    
-    def _get_sync_client(self) -> httpx.Client:
-        """Get or create the shared synchronous HTTP client (connection pooling)."""
-        with self._sync_client_lock:
-            if self._sync_http_client is None or self._sync_http_client.is_closed:
-                timeout = httpx.Timeout(
-                    connect=self.config.connect_timeout,
-                    read=self.config.read_timeout,
-                    write=self.config.write_timeout,
-                    pool=self.config.connect_timeout
-                )
-                self._sync_http_client = httpx.Client(
-                    timeout=timeout,
-                    limits=httpx.Limits(max_connections=100, max_keepalive_connections=20)
-                )
-            return self._sync_http_client
-    
-    def close_sync(self) -> None:
-        """Close the synchronous HTTP client."""
-        with self._sync_client_lock:
-            if self._sync_http_client and not self._sync_http_client.is_closed:
-                self._sync_http_client.close()
-                self._sync_http_client = None
-    
-    def _request_sync_with_retry(
-        self,
-        method: str,
-        url: str,
-        **kwargs
-    ) -> httpx.Response:
+
+    def _request_with_retry(self, method: str, url: str, **kwargs) -> httpx.Response:
         """
-        Make synchronous HTTP request with automatic retry on transient failures.
-        
-        Uses exponential backoff with jitter. Gevent-compatible.
+        HTTP request with exponential backoff retry. Uses gevent.sleep for yielding.
         """
-        client = self._get_sync_client()
+        client = self._get_client()
         last_exception = None
         delay = self.config.retry_delay
-        
+
+        if self.config.client_name:
+            headers = kwargs.pop("headers", {})
+            headers["X-GhostStream-Client"] = self.config.client_name
+            kwargs["headers"] = headers
+
         for attempt in range(self.config.max_retries + 1):
             try:
-                response = client.request(method, url, **kwargs)
-                
-                # Retry on specific status codes
+                with self._request_slots:
+                    response = client.request(method, url, **kwargs)
+
                 if response.status_code in self.config.retry_on_status:
                     if attempt < self.config.max_retries:
                         logger.warning(
-                            f"[GhostStream] Request returned {response.status_code}, "
+                            f"[GhostStream] {response.status_code} from {url}, "
                             f"retrying ({attempt + 1}/{self.config.max_retries})..."
                         )
-                        time.sleep(delay + random.uniform(0, 1))
+                        gevent_sleep(delay + random.uniform(0, 1))
                         delay = min(delay * self.config.retry_multiplier, self.config.retry_max_delay)
                         continue
-                
+
                 return response
-                
+
             except (httpx.ConnectError, httpx.ConnectTimeout) as e:
                 last_exception = e
                 if attempt < self.config.max_retries:
                     logger.warning(
                         f"[GhostStream] Connection failed, retrying ({attempt + 1}/{self.config.max_retries})..."
                     )
-                    time.sleep(delay + random.uniform(0, 1))
+                    gevent_sleep(delay + random.uniform(0, 1))
                     delay = min(delay * self.config.retry_multiplier, self.config.retry_max_delay)
                 else:
                     raise
@@ -399,49 +389,233 @@ class GhostStreamClient:
                     logger.warning(
                         f"[GhostStream] Request timed out, retrying ({attempt + 1}/{self.config.max_retries})..."
                     )
-                    time.sleep(delay)
+                    gevent_sleep(delay)
                     delay = min(delay * self.config.retry_multiplier, self.config.retry_max_delay)
                 else:
                     raise
-        
+
         if last_exception:
             raise last_exception
         raise RuntimeError("Unexpected retry loop exit")
-    
-    def health_check_sync(self, server: Optional[GhostStreamServer] = None) -> bool:
-        """Check if a server is healthy (synchronous)."""
+
+    # =========================================================================
+    # Discovery
+    # =========================================================================
+
+    def add_callback(self, callback: Callable[[str, GhostStreamServer], None]) -> None:
+        self._callbacks.append(callback)
+
+    def _on_server_found(self, server: GhostStreamServer) -> None:
+        self.servers[server.name] = server
+        self._ensure_job_limiter(server)
+        if self.preferred_server is None:
+            self.preferred_server = server.name
+        elif server.has_hw_accel and not self.get_server().has_hw_accel:
+            self.preferred_server = server.name
+        for cb in self._callbacks:
+            try:
+                cb("found", server)
+            except Exception as e:
+                logger.error(f"Callback error: {e}")
+
+    def _on_server_removed(self, name: str) -> None:
+        server = self.servers.pop(name, None)
+        if server:
+            self._drop_server_tokens(server)
+            self._job_limiters.pop(server.name, None)
+        if self.preferred_server == name:
+            self.preferred_server = next(iter(self.servers.keys()), None)
+        if server:
+            for cb in self._callbacks:
+                try:
+                    cb("removed", server)
+                except Exception as e:
+                    logger.error(f"Callback error: {e}")
+
+    def start_discovery(self) -> None:
+        """Start mDNS discovery for GhostStream servers on the LAN."""
+        if self._discovery_started:
+            return
+        try:
+            logger.info(f"[mDNS] Starting discovery for {GhostStreamDiscoveryListener.SERVICE_TYPE}")
+            self.zeroconf = Zeroconf()
+            listener = GhostStreamDiscoveryListener(
+                on_found=self._on_server_found,
+                on_removed=self._on_server_removed
+            )
+            self.browser = ServiceBrowser(
+                self.zeroconf,
+                GhostStreamDiscoveryListener.SERVICE_TYPE,
+                listener
+            )
+            self._discovery_started = True
+            logger.info("[mDNS] Discovery started")
+        except Exception as e:
+            logger.error(f"[mDNS] Failed to start discovery: {e}", exc_info=True)
+
+    def stop_discovery(self) -> None:
+        """Stop mDNS discovery and unregister from zeroconf."""
+        if self.browser:
+            self.browser.cancel()
+        if self.zeroconf:
+            self.zeroconf.close()
+        self.browser = None
+        self.zeroconf = None
+        self._discovery_started = False
+
+    def is_available(self) -> bool:
+        return len(self.servers) > 0
+
+    def get_server(self, name: Optional[str] = None) -> Optional[GhostStreamServer]:
+        if name:
+            return self.servers.get(name)
+        if self.preferred_server:
+            return self.servers.get(self.preferred_server)
+        return None
+
+    def get_all_servers(self) -> List[GhostStreamServer]:
+        return list(self.servers.values())
+
+    # =========================================================================
+    # Transcode API
+    # =========================================================================
+
+    def health_check(self, server: Optional[GhostStreamServer] = None) -> bool:
         server = server or self.get_server()
         if not server:
             return False
-        
         try:
-            response = self._request_sync_with_retry(
-                "GET",
-                f"{server.base_url}/api/health"
-            )
+            response = self._request_with_retry("GET", f"{server.base_url}/api/health")
             return response.status_code == 200
         except Exception:
             return False
-    
-    def get_capabilities_sync(self, server: Optional[GhostStreamServer] = None) -> Optional[Dict]:
-        """Get server capabilities (synchronous)."""
+
+    def get_health(self, server: Optional[GhostStreamServer] = None) -> Optional[Dict]:
+        """Get full health status including uptime, job counts."""
         server = server or self.get_server()
         if not server:
             return None
-        
         try:
-            response = self._request_sync_with_retry(
-                "GET",
-                f"{server.base_url}/api/capabilities"
-            )
+            response = self._request_with_retry("GET", f"{server.base_url}/api/health")
+            if response.status_code == 200:
+                return response.json()
+        except Exception as e:
+            logger.error(f"Failed to get health: {e}")
+        return None
+
+    def get_health_detailed(self, server: Optional[GhostStreamServer] = None) -> Optional[Dict]:
+        """Get detailed health including per-component status."""
+        server = server or self.get_server()
+        if not server:
+            return None
+        try:
+            response = self._request_with_retry("GET", f"{server.base_url}/api/health/detailed")
+            if response.status_code == 200:
+                return response.json()
+        except Exception as e:
+            logger.error(f"Failed to get detailed health: {e}")
+        return None
+
+    def get_capabilities(self, server: Optional[GhostStreamServer] = None) -> Optional[Dict]:
+        server = server or self.get_server()
+        if not server:
+            return None
+        try:
+            response = self._request_with_retry("GET", f"{server.base_url}/api/capabilities")
             if response.status_code == 200:
                 return response.json()
         except Exception as e:
             logger.error(f"Failed to get capabilities: {e}")
-        
         return None
-    
-    def transcode_sync(
+
+    def get_stats(self, server: Optional[GhostStreamServer] = None) -> Optional[Dict]:
+        """Get server statistics (uptime, jobs processed, throughput)."""
+        server = server or self.get_server()
+        if not server:
+            return None
+        try:
+            response = self._request_with_retry("GET", f"{server.base_url}/api/stats")
+            if response.status_code == 200:
+                return response.json()
+        except Exception as e:
+            logger.error(f"Failed to get stats: {e}")
+        return None
+
+    def get_shared_streams(self, server: Optional[GhostStreamServer] = None) -> Optional[Dict]:
+        """Get active shared stream information."""
+        server = server or self.get_server()
+        if not server:
+            return None
+        try:
+            response = self._request_with_retry("GET", f"{server.base_url}/api/streams/shared")
+            if response.status_code == 200:
+                return response.json()
+        except Exception as e:
+            logger.error(f"Failed to get shared streams: {e}")
+        return None
+
+    def get_stream_info(self, job_id: str, server: Optional[GhostStreamServer] = None) -> Optional[Dict]:
+        """Get stream metadata for a specific job."""
+        server = server or self.get_server()
+        if not server:
+            return None
+        try:
+            response = self._request_with_retry(
+                "GET",
+                f"{server.base_url}/api/transcode/{job_id}/stream",
+                headers=self._auth_headers(server, job_id),
+            )
+            if response.status_code == 200:
+                return response.json()
+        except Exception as e:
+            logger.error(f"Failed to get stream info: {e}")
+        return None
+
+    def leave_stream(self, job_id: str, session_id: Optional[str] = None, server: Optional[GhostStreamServer] = None) -> bool:
+        """Leave a shared stream."""
+        server = server or self.get_server()
+        if not server:
+            return False
+        try:
+            body = {"session_id": session_id} if session_id else {}
+            response = self._request_with_retry(
+                "POST",
+                f"{server.base_url}/api/transcode/{job_id}/leave",
+                headers=self._auth_headers(server, job_id),
+                json=body,
+            )
+            return response.status_code == 200
+        except Exception as e:
+            logger.error(f"Failed to leave stream: {e}")
+        return False
+
+    def get_cleanup_stats(self, server: Optional[GhostStreamServer] = None) -> Optional[Dict]:
+        """Get cleanup statistics."""
+        server = server or self.get_server()
+        if not server:
+            return None
+        try:
+            response = self._request_with_retry("GET", f"{server.base_url}/api/cleanup/stats")
+            if response.status_code == 200:
+                return response.json()
+        except Exception as e:
+            logger.error(f"Failed to get cleanup stats: {e}")
+        return None
+
+    def run_cleanup(self, server: Optional[GhostStreamServer] = None) -> Optional[Dict]:
+        """Trigger a cleanup run."""
+        server = server or self.get_server()
+        if not server:
+            return None
+        try:
+            response = self._request_with_retry("POST", f"{server.base_url}/api/cleanup/run")
+            if response.status_code == 200:
+                return response.json()
+        except Exception as e:
+            logger.error(f"Failed to run cleanup: {e}")
+        return None
+
+    def transcode(
         self,
         source: str,
         mode: str = "stream",
@@ -455,44 +629,22 @@ class GhostStreamClient:
         tone_map: bool = True,
         two_pass: bool = False,
         max_audio_channels: int = 2,
+        subtitles: Optional[List[Dict]] = None,
         session_id: Optional[str] = None,
         server: Optional[GhostStreamServer] = None
     ) -> Optional[TranscodeJob]:
-        """
-        Start a transcoding job (synchronous, gevent-compatible).
-        
-        Args:
-            source: Source file URL (accessible from GhostStream server)
-            mode: Transcoding mode ("stream", "abr", "batch")
-            format: Output format (hls, mp4, webm, etc.)
-            video_codec: Video codec (h264, h265, vp9, av1)
-            audio_codec: Audio codec (aac, opus, copy)
-            resolution: Target resolution (4k, 1080p, 720p, 480p, original)
-            bitrate: Target bitrate or "auto"
-            hw_accel: Hardware acceleration (auto, nvenc, qsv, software)
-            start_time: Start position in seconds
-            tone_map: Convert HDR to SDR automatically
-            two_pass: Use two-pass encoding for batch mode
-            max_audio_channels: Max audio channels (2=stereo, 6=5.1)
-            session_id: Session ID for job tracking
-            server: Specific server to use
-        
-        Returns:
-            TranscodeJob with stream_url for playback
-        """
         server = server or self.get_server()
         if not server:
             if self.servers:
                 server = next(iter(self.servers.values()))
-                logger.info(f"[GhostStream] Using first available server: {server.name}")
             else:
-                logger.error("[GhostStream] No servers available for transcoding")
+                logger.error("[GhostStream] No servers available")
                 return TranscodeJob(
                     job_id="error",
                     status=TranscodeStatus.ERROR,
                     error_message="No GhostStream servers available. Add a server in Settings."
                 )
-        
+
         request_body = {
             "source": source,
             "mode": mode,
@@ -507,524 +659,106 @@ class GhostStreamClient:
                 "two_pass": two_pass,
                 "max_audio_channels": max_audio_channels
             },
+            "subtitles": subtitles,
             "start_time": start_time,
             "session_id": session_id
         }
-        
-        logger.info(f"[GhostStream] Sending transcode request to {server.base_url}/api/transcode/start")
-        logger.info(f"[GhostStream] Request: source={source[:80]}..., mode={mode}, resolution={resolution}")
-        
+
+        logger.info(f"[GhostStream] POST {server.base_url}/api/transcode/start — source={source[:80]}... mode={mode} res={resolution}")
+        self._reserve_job_slot(server)
+
         try:
-            response = self._request_sync_with_retry(
+            response = self._request_with_retry(
                 "POST",
                 f"{server.base_url}/api/transcode/start",
                 json=request_body
             )
-            
-            logger.info(f"[GhostStream] Response status: {response.status_code}")
-            
             if response.status_code == 200:
                 data = response.json()
                 logger.info(f"[GhostStream] Job created: {data.get('job_id')}")
-                return self._job_from_payload(data, server)
+                job = self._job_from_payload(data, server)
+                self._job_slot_modes[self._token_key(server, job.job_id)] = mode
+                return job
             else:
                 error_text = response.text
                 logger.error(f"[GhostStream] Transcode failed ({response.status_code}): {error_text[:300]}")
+                self._release_job_slot(server, "error")
                 return TranscodeJob(
                     job_id="error",
                     status=TranscodeStatus.ERROR,
                     error_message=f"GhostStream error ({response.status_code}): {error_text[:200]}"
                 )
-        except httpx.ConnectError as e:
-            logger.error(f"[GhostStream] Cannot connect to {server.base_url}: {e}")
-            return TranscodeJob(
+        except httpx.ConnectError:
+            logger.error(f"[GhostStream] Cannot connect to {server.base_url}")
+            job = TranscodeJob(
                 job_id="error",
                 status=TranscodeStatus.ERROR,
                 error_message=f"Cannot connect to GhostStream at {server.host}:{server.port}"
             )
-        except httpx.TimeoutException as e:
-            logger.error(f"[GhostStream] Request timed out to {server.base_url}: {e}")
-            return TranscodeJob(
+            return job
+        except httpx.TimeoutException:
+            logger.error(f"[GhostStream] Request timed out to {server.base_url}")
+            job = TranscodeJob(
                 job_id="error",
                 status=TranscodeStatus.ERROR,
                 error_message="Request to GhostStream timed out"
             )
+            return job
         except Exception as e:
             logger.error(f"[GhostStream] Transcode request error: {e}", exc_info=True)
-            return TranscodeJob(
+            job = TranscodeJob(
                 job_id="error",
                 status=TranscodeStatus.ERROR,
                 error_message=str(e)
             )
-    
-    def get_job_status_sync(
-        self,
-        job_id: str,
-        server: Optional[GhostStreamServer] = None
-    ) -> Optional[TranscodeJob]:
-        """Get the status of a transcoding job (synchronous)."""
-        server = server or self.get_server()
-        if not server:
-            return None
-        
-        try:
-            response = self._request_sync_with_retry(
-                "GET",
-                f"{server.base_url}/api/transcode/{job_id}/status",
-                headers=self._auth_headers(server, job_id),
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                return self._job_from_payload(data, server)
-        except Exception as e:
-            logger.error(f"Status request error: {e}")
-        
-        return None
-    
-    def cancel_job_sync(
-        self,
-        job_id: str,
-        server: Optional[GhostStreamServer] = None
-    ) -> bool:
-        """Cancel a transcoding job (synchronous)."""
-        server = server or self.get_server()
-        if not server:
-            return False
-        
-        try:
-            response = self._request_sync_with_retry(
-                "POST",
-                f"{server.base_url}/api/transcode/{job_id}/cancel",
-                headers=self._auth_headers(server, job_id),
-            )
-            success = response.status_code == 200
-            if success:
-                self._drop_control_token(server, job_id)
-            return success
-        except Exception as e:
-            logger.error(f"Cancel request error: {e}")
-        
-        return False
-    
-    def delete_job_sync(
-        self,
-        job_id: str,
-        server: Optional[GhostStreamServer] = None
-    ) -> bool:
-        """Delete a transcoding job and its files (synchronous)."""
-        server = server or self.get_server()
-        if not server:
-            return False
-        
-        try:
-            response = self._request_sync_with_retry(
-                "DELETE",
-                f"{server.base_url}/api/transcode/{job_id}",
-                headers=self._auth_headers(server, job_id),
-            )
-            success = response.status_code == 200
-            if success:
-                self._drop_control_token(server, job_id)
-            return success
-        except Exception as e:
-            logger.error(f"Delete request error: {e}")
-        
-        return False
-    
-    def wait_for_ready_sync(
-        self,
-        job_id: str,
-        timeout: float = 300,
-        poll_interval: float = 1.0,
-        server: Optional[GhostStreamServer] = None
-    ) -> Optional[TranscodeJob]:
-        """
-        Wait for a job to be ready for streaming (synchronous).
-        
-        For live transcoding (HLS), the job becomes ready quickly
-        as segments are generated.
-        """
-        server = server or self.get_server()
-        if not server:
-            return None
-        
-        elapsed = 0
-        while elapsed < timeout:
-            job = self.get_job_status_sync(job_id, server)
-            
-            if job is None:
-                return None
-            
-            if job.status == TranscodeStatus.READY:
-                return job
-            
-            if job.status == TranscodeStatus.ERROR:
-                logger.error(f"Job failed: {job.error_message}")
-                return job
-            
-            if job.status == TranscodeStatus.CANCELLED:
-                return job
-            
-            # For streaming mode, return as soon as we have a stream URL
-            if job.stream_url and job.status == TranscodeStatus.PROCESSING:
-                return job
-            
-            time.sleep(poll_interval)
-            elapsed += poll_interval
-        
-        logger.error(f"Timeout waiting for job {job_id}")
-        return None
-    
-    # =========================================================================
-    # Async API
-    # =========================================================================
-    
-    async def __aenter__(self) -> "GhostStreamClient":
-        """Context manager entry."""
-        return self
-    
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
-        """Context manager exit - cleanup resources."""
-        await self.close()
-    
-    async def _request_with_retry(
-        self,
-        method: str,
-        url: str,
-        **kwargs
-    ) -> httpx.Response:
-        """
-        Make HTTP request with automatic retry on transient failures.
-        
-        Uses exponential backoff with jitter.
-        """
-        client = await self._get_client()
-        last_exception = None
-        delay = self.config.retry_delay
-        
-        for attempt in range(self.config.max_retries + 1):
-            try:
-                response = await client.request(method, url, **kwargs)
-                
-                # Retry on specific status codes
-                if response.status_code in self.config.retry_on_status:
-                    if attempt < self.config.max_retries:
-                        logger.warning(
-                            f"[GhostStream] Request returned {response.status_code}, "
-                            f"retrying ({attempt + 1}/{self.config.max_retries})..."
-                        )
-                        await asyncio.sleep(delay + random.uniform(0, 1))
-                        delay = min(delay * self.config.retry_multiplier, self.config.retry_max_delay)
-                        continue
-                
-                return response
-                
-            except (httpx.ConnectError, httpx.ConnectTimeout) as e:
-                last_exception = e
-                if attempt < self.config.max_retries:
-                    logger.warning(
-                        f"[GhostStream] Connection failed, retrying ({attempt + 1}/{self.config.max_retries})..."
-                    )
-                    await asyncio.sleep(delay + random.uniform(0, 1))
-                    delay = min(delay * self.config.retry_multiplier, self.config.retry_max_delay)
-                else:
-                    raise
-            except httpx.TimeoutException as e:
-                last_exception = e
-                if attempt < self.config.max_retries:
-                    logger.warning(
-                        f"[GhostStream] Request timed out, retrying ({attempt + 1}/{self.config.max_retries})..."
-                    )
-                    await asyncio.sleep(delay)
-                    delay = min(delay * self.config.retry_multiplier, self.config.retry_max_delay)
-                else:
-                    raise
-        
-        # Should not reach here, but just in case
-        if last_exception:
-            raise last_exception
-        raise RuntimeError("Unexpected retry loop exit")
-    
-    def add_callback(self, callback: Callable[[str, GhostStreamServer], None]) -> None:
-        """
-        Add a callback for server discovery events.
-        
-        Args:
-            callback: Function called with (event_type, server) where event_type
-                     is "found" or "removed"
-        """
-        self._callbacks.append(callback)
-    
-    def _on_server_found(self, server: GhostStreamServer) -> None:
-        """Called when a server is discovered."""
-        self.servers[server.name] = server
-        
-        # Auto-select first server with hw accel, or first found
-        if self.preferred_server is None:
-            self.preferred_server = server.name
-        elif server.has_hw_accel and not self.get_server().has_hw_accel:
-            self.preferred_server = server.name
-        
-        for callback in self._callbacks:
-            try:
-                callback("found", server)
-            except Exception as e:
-                logger.error(f"Callback error: {e}")
-    
-    def _on_server_removed(self, name: str) -> None:
-        """Called when a server is removed."""
-        server = self.servers.pop(name, None)
-        if server:
-            self._drop_server_tokens(server)
-        
-        if self.preferred_server == name:
-            # Select another server if available
-            self.preferred_server = next(iter(self.servers.keys()), None)
-        
-        if server:
-            for callback in self._callbacks:
+            return job
+        finally:
+            if "job" not in locals() or job.job_id == "error":
                 try:
-                    callback("removed", server)
-                except Exception as e:
-                    logger.error(f"Callback error: {e}")
-    
-    def start_discovery(self) -> None:
-        """Start mDNS discovery for GhostStream servers."""
-        if self._discovery_started:
-            logger.debug("Discovery already started")
-            return
-        
-        try:
-            logger.info(f"[mDNS] Starting discovery for {GhostStreamDiscoveryListener.SERVICE_TYPE}")
-            self.zeroconf = Zeroconf()
-            listener = GhostStreamDiscoveryListener(
-                on_found=self._on_server_found,
-                on_removed=self._on_server_removed
-            )
-            self.browser = ServiceBrowser(
-                self.zeroconf,
-                GhostStreamDiscoveryListener.SERVICE_TYPE,
-                listener
-            )
-            self._discovery_started = True
-            logger.info("[mDNS] Discovery started successfully - listening for GhostStream servers on the network")
-        except Exception as e:
-            logger.error(f"[mDNS] Failed to start discovery: {e}", exc_info=True)
-    
-    def stop_discovery(self) -> None:
-        """Stop mDNS discovery."""
-        if self.browser:
-            self.browser.cancel()
-        if self.zeroconf:
-            self.zeroconf.close()
-        
-        self.browser = None
-        self.zeroconf = None
-        self._discovery_started = False
-    
-    def is_available(self) -> bool:
-        """Check if any GhostStream server is available."""
-        return len(self.servers) > 0
-    
-    def get_server(self, name: Optional[str] = None) -> Optional[GhostStreamServer]:
-        """Get a server by name, or the preferred server."""
-        if name:
-            return self.servers.get(name)
-        if self.preferred_server:
-            return self.servers.get(self.preferred_server)
-        return None
-    
-    def get_all_servers(self) -> List[GhostStreamServer]:
-        """Get all discovered servers."""
-        return list(self.servers.values())
-    
-    async def health_check(self, server: Optional[GhostStreamServer] = None) -> bool:
-        """Check if a server is healthy."""
-        server = server or self.get_server()
-        if not server:
-            return False
-        
-        try:
-            response = await self._request_with_retry(
-                "GET",
-                f"{server.base_url}/api/health"
-            )
-            return response.status_code == 200
-        except Exception:
-            return False
-    
-    async def get_capabilities(self, server: Optional[GhostStreamServer] = None) -> Optional[Dict]:
-        """Get server capabilities."""
-        server = server or self.get_server()
-        if not server:
-            return None
-        
-        try:
-            response = await self._request_with_retry(
-                "GET",
-                f"{server.base_url}/api/capabilities"
-            )
-            if response.status_code == 200:
-                return response.json()
-        except Exception as e:
-            logger.error(f"Failed to get capabilities: {e}")
-        
-        return None
-    
-    async def transcode(
-        self,
-        source: str,
-        mode: str = "stream",
-        format: str = "hls",
-        video_codec: str = "h264",
-        audio_codec: str = "aac",
-        resolution: str = "original",
-        bitrate: str = "auto",
-        hw_accel: str = "auto",
-        start_time: float = 0,
-        server: Optional[GhostStreamServer] = None
-    ) -> Optional[TranscodeJob]:
-        """
-        Start a transcoding job.
-        
-        Args:
-            source: Source file URL (accessible from GhostStream server)
-            mode: Transcoding mode:
-                  - "stream": Single quality HLS streaming (default)
-                  - "abr": Adaptive Bitrate with multiple quality variants
-                  - "batch": File output (MP4, etc.)
-            format: Output format (hls, mp4, webm, etc.)
-            video_codec: Video codec (h264, h265, vp9, av1)
-            audio_codec: Audio codec (aac, opus, copy)
-            resolution: Target resolution (4k, 1080p, 720p, 480p, original)
-            bitrate: Target bitrate or "auto"
-            hw_accel: Hardware acceleration (auto, nvenc, qsv, software)
-            start_time: Start position in seconds
-            server: Specific server to use
-        
-        Returns:
-            TranscodeJob with stream_url for playback
-        
-        Example:
-            # Standard streaming
-            job = await client.transcode(source="http://...", mode="stream")
-            
-            # Adaptive bitrate (Netflix-style multiple qualities)
-            job = await client.transcode(source="http://...", mode="abr")
-        """
-        server = server or self.get_server()
-        if not server:
-            # Try to get any available server
-            if self.servers:
-                server = next(iter(self.servers.values()))
-                logger.info(f"[GhostStream] Using first available server: {server.name}")
-            else:
-                logger.error("[GhostStream] No servers available for transcoding")
-                return TranscodeJob(
-                    job_id="error",
-                    status=TranscodeStatus.ERROR,
-                    error_message="No GhostStream servers available. Add a server in Settings."
-                )
-        
-        # Build request matching GhostStream's TranscodeRequest pydantic model exactly
-        request_body = {
-            "source": source,
-            "mode": mode,  # "stream" or "batch"
-            "output": {
-                "format": format,        # "hls", "mp4", "webm", etc.
-                "video_codec": video_codec,  # "h264", "h265", "vp9", "av1", "copy"
-                "audio_codec": audio_codec,  # "aac", "opus", "mp3", "flac", "ac3", "copy"
-                "resolution": resolution,    # "4k", "1080p", "720p", "480p", "original"
-                "bitrate": bitrate,
-                "hw_accel": hw_accel      # "auto", "nvenc", "qsv", "vaapi", "videotoolbox", "amf", "software"
-            },
-            "start_time": start_time
-        }
-        
-        logger.info(f"[GhostStream] Sending transcode request to {server.base_url}/api/transcode/start")
-        logger.info(f"[GhostStream] Request body: source={source[:80]}..., mode={mode}, resolution={resolution}")
-        
-        try:
-            response = await self._request_with_retry(
-                "POST",
-                f"{server.base_url}/api/transcode/start",
-                json=request_body
-            )
-            
-            logger.info(f"[GhostStream] Response status: {response.status_code}")
-            
-            if response.status_code == 200:
-                data = response.json()
-                logger.info(f"[GhostStream] Job created: {data.get('job_id')}")
-                return self._job_from_payload(data, server)
-            else:
-                error_text = response.text
-                logger.error(f"[GhostStream] Transcode failed ({response.status_code}): {error_text[:300]}")
-                return TranscodeJob(
-                    job_id="error",
-                    status=TranscodeStatus.ERROR,
-                    error_message=f"GhostStream error ({response.status_code}): {error_text[:200]}"
-                )
-        except httpx.ConnectError as e:
-            logger.error(f"[GhostStream] Cannot connect to {server.base_url}: {e}")
-            return TranscodeJob(
-                job_id="error",
-                status=TranscodeStatus.ERROR,
-                error_message=f"Cannot connect to GhostStream at {server.host}:{server.port}"
-            )
-        except httpx.TimeoutException as e:
-            logger.error(f"[GhostStream] Request timed out to {server.base_url}: {e}")
-            return TranscodeJob(
-                job_id="error",
-                status=TranscodeStatus.ERROR,
-                error_message=f"Request to GhostStream timed out"
-            )
-        except Exception as e:
-            logger.error(f"[GhostStream] Transcode request error: {e}", exc_info=True)
-            return TranscodeJob(
-                job_id="error",
-                status=TranscodeStatus.ERROR,
-                error_message=str(e)
-            )
-    
-    async def get_job_status(
+                    self._ensure_job_limiter(server).release()
+                except ValueError:
+                    logger.debug(
+                        "[GhostStream] Job slot already released after failed create on %s",
+                        server.name,
+                    )
+
+    def get_job_status(
         self,
         job_id: str,
         server: Optional[GhostStreamServer] = None
     ) -> Optional[TranscodeJob]:
-        """Get the status of a transcoding job."""
         server = server or self.get_server()
         if not server:
             return None
-        
         try:
-            response = await self._request_with_retry(
+            response = self._request_with_retry(
                 "GET",
                 f"{server.base_url}/api/transcode/{job_id}/status",
                 headers=self._auth_headers(server, job_id),
             )
-            
             if response.status_code == 200:
-                data = response.json()
-                return self._job_from_payload(data, server)
+                job = self._job_from_payload(response.json(), server)
+                if job.status in (TranscodeStatus.ERROR, TranscodeStatus.CANCELLED):
+                    self._release_job_slot(server, job.job_id)
+                elif job.status == TranscodeStatus.READY:
+                    mode = self._job_slot_modes.get(self._token_key(server, job.job_id))
+                    if mode and mode != "stream":
+                        self._release_job_slot(server, job.job_id)
+                return job
         except Exception as e:
             logger.error(f"Status request error: {e}")
-        
         return None
-    
-    async def cancel_job(
+
+    def cancel_job(
         self,
         job_id: str,
         server: Optional[GhostStreamServer] = None
     ) -> bool:
-        """Cancel a transcoding job."""
         server = server or self.get_server()
         if not server:
             return False
-        
         try:
-            response = await self._request_with_retry(
+            response = self._request_with_retry(
                 "POST",
                 f"{server.base_url}/api/transcode/{job_id}/cancel",
                 headers=self._auth_headers(server, job_id),
@@ -1032,24 +766,22 @@ class GhostStreamClient:
             success = response.status_code == 200
             if success:
                 self._drop_control_token(server, job_id)
+                self._release_job_slot(server, job_id)
             return success
         except Exception as e:
             logger.error(f"Cancel request error: {e}")
-        
         return False
-    
-    async def delete_job(
+
+    def delete_job(
         self,
         job_id: str,
         server: Optional[GhostStreamServer] = None
     ) -> bool:
-        """Delete a transcoding job and its files."""
         server = server or self.get_server()
         if not server:
             return False
-        
         try:
-            response = await self._request_with_retry(
+            response = self._request_with_retry(
                 "DELETE",
                 f"{server.base_url}/api/transcode/{job_id}",
                 headers=self._auth_headers(server, job_id),
@@ -1057,135 +789,42 @@ class GhostStreamClient:
             success = response.status_code == 200
             if success:
                 self._drop_control_token(server, job_id)
+                self._release_job_slot(server, job_id)
             return success
         except Exception as e:
             logger.error(f"Delete request error: {e}")
-        
         return False
-    
-    async def subscribe_progress(
-        self,
-        job_ids: List[str],
-        server: Optional[GhostStreamServer] = None
-    ) -> AsyncIterator[Dict[str, Any]]:
-        """
-        Subscribe to real-time progress updates via WebSocket.
-        
-        Yields progress events as they arrive. Much more efficient than polling.
-        
-        Args:
-            job_ids: List of job IDs to subscribe to
-            server: Server to connect to
-        
-        Yields:
-            Dict with progress data: {"type": "progress", "job_id": "...", "data": {...}}
-        
-        Example:
-            async for event in client.subscribe_progress(["job-123"]):
-                if event["type"] == "progress":
-                    print(f"Progress: {event['data']['progress']}%")
-                elif event["type"] == "status_change":
-                    print(f"Status: {event['data']['status']}")
-        
-        Requires: pip install websockets
-        """
-        if not HAS_WEBSOCKETS:
-            logger.error("WebSocket support requires 'websockets' package: pip install websockets")
-            return
-        
-        server = server or self.get_server()
-        if not server:
-            logger.error("No server available for WebSocket connection")
-            return
-        
-        ws_url = f"ws://{server.host}:{server.port}/ws/progress"
-        job_tokens = {
-            job_id: token
-            for job_id in job_ids
-            if (token := self._get_control_token(server, job_id))
-        }
-        
-        try:
-            async with websockets.connect(ws_url) as ws:
-                # Subscribe to jobs
-                subscribe_msg = {
-                    "type": "subscribe",
-                    "job_ids": job_ids,
-                    "job_tokens": job_tokens,
-                }
-                await ws.send(json.dumps(subscribe_msg))
-                logger.info(f"[GhostStream] Subscribed to progress for {len(job_ids)} jobs")
-                
-                # Yield events as they arrive
-                async for message in ws:
-                    try:
-                        event = json.loads(message)
-                        yield event
-                        
-                        # Check if all jobs are complete
-                        if event.get("type") == "status_change":
-                            status = event.get("data", {}).get("status")
-                            if status in ["ready", "error", "cancelled"]:
-                                job_id = event.get("job_id")
-                                if job_id in job_ids:
-                                    job_ids.remove(job_id)
-                                if not job_ids:
-                                    logger.info("[GhostStream] All jobs complete, closing WebSocket")
-                                    return
-                    except json.JSONDecodeError:
-                        logger.warning(f"[GhostStream] Invalid WebSocket message: {message[:100]}")
-        except Exception as e:
-            logger.error(f"[GhostStream] WebSocket error: {e}")
-    
-    async def wait_for_ready(
+
+    def wait_for_ready(
         self,
         job_id: str,
         timeout: float = 300,
         poll_interval: float = 1.0,
-        server: Optional[GhostStreamServer] = None,
-        use_websocket: bool = False
+        server: Optional[GhostStreamServer] = None
     ) -> Optional[TranscodeJob]:
-        """
-        Wait for a job to be ready for streaming.
-        
-        For live transcoding (HLS), the job becomes ready quickly
-        as segments are generated.
-        
-        Args:
-            job_id: Job ID to wait for
-            timeout: Maximum time to wait in seconds
-            poll_interval: How often to poll (ignored if use_websocket=True)
-            server: Server to query
-            use_websocket: Use WebSocket for real-time updates (more efficient)
-        """
+        """Poll until the job is ready, yielding to the gevent hub between polls."""
         server = server or self.get_server()
         if not server:
             return None
-        
-        elapsed = 0
+
+        elapsed = 0.0
         while elapsed < timeout:
-            job = await self.get_job_status(job_id, server)
-            
+            job = self.get_job_status(job_id, server)
             if job is None:
                 return None
-            
             if job.status == TranscodeStatus.READY:
                 return job
-            
             if job.status == TranscodeStatus.ERROR:
-                logger.error(f"Job failed: {job.error_message}")
+                logger.error(f"Job {job_id} failed: {job.error_message}")
                 return job
-            
             if job.status == TranscodeStatus.CANCELLED:
                 return job
-            
-            # For streaming mode, return as soon as we have a stream URL
+            # Streaming mode: stream URL available before READY
             if job.stream_url and job.status == TranscodeStatus.PROCESSING:
                 return job
-            
-            await asyncio.sleep(poll_interval)
+            gevent_sleep(poll_interval)
             elapsed += poll_interval
-        
+
         logger.error(f"Timeout waiting for job {job_id}")
         return None
 
@@ -1193,46 +832,37 @@ class GhostStreamClient:
 class GhostStreamLoadBalancer:
     """
     Load balancer for distributing transcode jobs across multiple GhostStream servers.
-    
+
+    Pure Specter-native: gevent.lock.BoundedSemaphore for mutual exclusion,
+    gevent.spawn for background stat refresh, gevent.sleep for polling.
+
     Usage:
         lb = GhostStreamLoadBalancer(strategy=LoadBalanceStrategy.LEAST_BUSY)
         lb.start_discovery()
-        
-        # Transcode - automatically picks best server
-        job = await lb.transcode(source="http://pi:5000/video.mkv")
-        
-        # Batch transcode multiple files
-        jobs = await lb.batch_transcode([
+
+        job = lb.transcode(source="http://pi:5000/video.mkv")
+
+        jobs = lb.batch_transcode([
             {"source": "http://pi:5000/video1.mkv"},
             {"source": "http://pi:5000/video2.mkv"},
-            {"source": "http://pi:5000/video3.mkv"},
         ])
     """
-    
+
     def __init__(
         self,
         strategy: LoadBalanceStrategy = LoadBalanceStrategy.LEAST_BUSY,
         manual_servers: Optional[List[str]] = None,
         client: Optional[GhostStreamClient] = None
     ):
-        """
-        Initialize the load balancer.
-        
-        Args:
-            strategy: How to distribute jobs across servers
-            manual_servers: List of server addresses (e.g., ["192.168.4.2:8765", "192.168.4.3:8765"])
-            client: Optional existing GhostStreamClient to use (shares discovered servers)
-        """
         self.strategy = strategy
         self.client = client or GhostStreamClient()
         self.server_stats: Dict[str, ServerStats] = {}
         self._round_robin_index = 0
-        self._stats_lock = asyncio.Lock()
-        self._job_server_map: Dict[str, str] = {}  # job_id -> server_name
-        self._stats_cache_ttl = 5.0  # Cache stats for 5 seconds
+        self._stats_lock = gevent.lock.BoundedSemaphore(1)
+        self._job_server_map: Dict[str, str] = {}
+        self._stats_cache_ttl = 5.0
         self._last_stats_refresh = 0.0
-        
-        # Add manual servers
+
         if manual_servers:
             for addr in manual_servers:
                 host, port = addr.split(":")
@@ -1243,156 +873,106 @@ class GhostStreamLoadBalancer:
                     port=int(port)
                 )
                 self.server_stats[name] = ServerStats()
-    
+
     def start_discovery(self) -> None:
-        """Start discovering GhostStream servers."""
         self.client.add_callback(self._on_server_change)
         self.client.start_discovery()
-    
+
     def stop_discovery(self) -> None:
-        """Stop discovery."""
         self.client.stop_discovery()
-    
+
     def _on_server_change(self, event: str, server: GhostStreamServer) -> None:
-        """Handle server discovery events."""
         if event == "found":
             self.server_stats[server.name] = ServerStats()
             logger.info(f"LoadBalancer: Added server {server.name}")
         elif event == "removed":
             self.server_stats.pop(server.name, None)
             logger.info(f"LoadBalancer: Removed server {server.name}")
-    
-    async def refresh_stats(self) -> None:
-        """Refresh statistics from all servers."""
-        for name, server in self.client.servers.items():
+
+    def refresh_stats(self) -> None:
+        """Pull health stats from every server. Called in a greenlet."""
+        for name, server in list(self.client.servers.items()):
             try:
-                # Use the client's shared HTTP client for connection pooling
-                response = await self.client._request_with_retry(
-                    "GET",
-                    f"{server.base_url}/api/health"
-                )
+                response = self.client._request_with_retry("GET", f"{server.base_url}/api/health")
                 if response.status_code == 200:
                     data = response.json()
-                    async with self._stats_lock:
+                    with self._stats_lock:
                         stats = self.server_stats.get(name, ServerStats())
                         stats.active_jobs = data.get("current_jobs", 0)
                         stats.queued_jobs = data.get("queued_jobs", 0)
                         stats.is_healthy = True
-                        stats.last_health_check = time.time()
+                        import time as _time
+                        stats.last_health_check = _time.time()
                         self.server_stats[name] = stats
                 else:
-                    async with self._stats_lock:
+                    with self._stats_lock:
                         if name in self.server_stats:
                             self.server_stats[name].is_healthy = False
             except Exception as e:
-                logger.warning(f"Failed to get stats from {name}: {e}")
-                async with self._stats_lock:
+                logger.warning(f"LoadBalancer: Failed to get stats from {name}: {e}")
+                with self._stats_lock:
                     if name in self.server_stats:
                         self.server_stats[name].is_healthy = False
-    
-    async def _select_server(self) -> Optional[GhostStreamServer]:
-        """Select a server based on the load balancing strategy."""
-        logger.info(f"[LoadBalancer] Selecting server from {len(self.client.servers)} available")
-        
-        # If no servers, return None
+
+    def _maybe_refresh_stats(self) -> None:
+        """Spawn a background greenlet to refresh stats if cache has expired."""
+        import time as _time
+        if _time.time() - self._last_stats_refresh > self._stats_cache_ttl:
+            self._last_stats_refresh = _time.time()
+            gevent.spawn(self.refresh_stats)
+
+    def _select_server(self) -> Optional[GhostStreamServer]:
+        logger.info(f"[LoadBalancer] Selecting from {len(self.client.servers)} server(s)")
+
         if not self.client.servers:
             logger.error("[LoadBalancer] No servers available")
             return None
-        
-        # Ensure all servers have stats entries
+
         for name in self.client.servers:
             if name not in self.server_stats:
                 self.server_stats[name] = ServerStats()
-                logger.debug(f"[LoadBalancer] Created stats for server: {name}")
-        
-        # Refresh stats if cache expired (non-blocking)
-        current_time = time.time()
-        if current_time - self._last_stats_refresh > self._stats_cache_ttl:
-            # Trigger refresh in background, don't block selection
-            asyncio.create_task(self._refresh_stats_background())
-        
-        # Use strategy-based selection
-        return await self._select_server_with_strategy()
-    
-    async def _refresh_stats_background(self) -> None:
-        """Refresh stats in background without blocking."""
-        self._last_stats_refresh = time.time()
-        try:
-            await self.refresh_stats()
-        except Exception as e:
-            logger.warning(f"[LoadBalancer] Background stats refresh failed: {e}")
-    
-    async def _select_server_with_strategy(self) -> Optional[GhostStreamServer]:
-        """Select server based on configured load balancing strategy."""
-        healthy_servers = [
+
+        self._maybe_refresh_stats()
+
+        healthy = [
             (name, self.client.servers[name])
             for name, stats in self.server_stats.items()
             if stats.is_healthy and name in self.client.servers
         ]
-        
-        # If no healthy servers, use all servers (stats might be stale)
-        if not healthy_servers:
+
+        if not healthy:
             logger.warning("[LoadBalancer] No healthy servers, using all available")
-            healthy_servers = [(name, server) for name, server in self.client.servers.items()]
-        
-        if not healthy_servers:
+            healthy = list(self.client.servers.items())
+
+        if not healthy:
             return None
-        
+
         if self.strategy == LoadBalanceStrategy.ROUND_ROBIN:
-            self._round_robin_index = (self._round_robin_index + 1) % len(healthy_servers)
-            return healthy_servers[self._round_robin_index][1]
-        
-        elif self.strategy == LoadBalanceStrategy.LEAST_BUSY:
-            best_name = min(
-                healthy_servers,
-                key=lambda x: (
-                    self.server_stats[x[0]].active_jobs +
-                    self.server_stats[x[0]].queued_jobs
-                )
-            )[0]
-            return self.client.servers[best_name]
-        
-        elif self.strategy == LoadBalanceStrategy.FASTEST:
-            # Prefer servers with hardware acceleration
-            hw_servers = [
-                (name, server) for name, server in healthy_servers
-                if server.has_hw_accel
-            ]
-            if hw_servers:
-                # Among HW servers, pick least busy
-                best_name = min(
-                    hw_servers,
-                    key=lambda x: self.server_stats[x[0]].active_jobs
-                )[0]
-                return self.client.servers[best_name]
-            # No HW servers, fall back to least busy
-            return await self._select_server_strategy(LoadBalanceStrategy.LEAST_BUSY, healthy_servers)
-        
-        elif self.strategy == LoadBalanceStrategy.RANDOM:
-            return random.choice(healthy_servers)[1]
-        
-        return healthy_servers[0][1]
-    
-    async def _select_server_strategy(
-        self,
-        strategy: LoadBalanceStrategy,
-        servers: List[tuple]
-    ) -> Optional[GhostStreamServer]:
-        """Helper for fallback strategy selection."""
-        if strategy == LoadBalanceStrategy.LEAST_BUSY:
-            best_name = min(
-                servers,
-                key=lambda x: self.server_stats[x[0]].active_jobs
-            )[0]
-            return self.client.servers[best_name]
-        return servers[0][1] if servers else None
-    
+            self._round_robin_index = (self._round_robin_index + 1) % len(healthy)
+            return healthy[self._round_robin_index][1]
+
+        if self.strategy == LoadBalanceStrategy.LEAST_BUSY:
+            best = min(
+                healthy,
+                key=lambda x: self.server_stats[x[0]].active_jobs + self.server_stats[x[0]].queued_jobs
+            )
+            return best[1]
+
+        if self.strategy == LoadBalanceStrategy.FASTEST:
+            hw = [(n, s) for n, s in healthy if s.has_hw_accel]
+            pool = hw if hw else healthy
+            best = min(pool, key=lambda x: self.server_stats[x[0]].active_jobs)
+            return best[1]
+
+        if self.strategy == LoadBalanceStrategy.RANDOM:
+            return random.choice(healthy)[1]
+
+        return healthy[0][1]
+
     def get_servers(self) -> List[GhostStreamServer]:
-        """Get all discovered servers."""
         return self.client.get_all_servers()
-    
+
     def get_server_stats(self) -> Dict[str, Dict]:
-        """Get stats for all servers."""
         return {
             name: {
                 "host": self.client.servers[name].host if name in self.client.servers else "unknown",
@@ -1403,8 +983,8 @@ class GhostStreamLoadBalancer:
             }
             for name, stats in self.server_stats.items()
         }
-    
-    async def transcode(
+
+    def transcode(
         self,
         source: str,
         mode: str = "stream",
@@ -1414,14 +994,11 @@ class GhostStreamLoadBalancer:
         resolution: str = "original",
         bitrate: str = "auto",
         hw_accel: str = "auto",
-        start_time: float = 0
+        start_time: float = 0,
+        subtitles: Optional[List[Dict]] = None
     ) -> Optional[TranscodeJob]:
-        """
-        Start a transcoding job on the best available server.
-        
-        Server is automatically selected based on load balancing strategy.
-        """
-        server = await self._select_server()
+        """Submit a transcode job to the best available server."""
+        server = self._select_server()
         if not server:
             logger.error("[LoadBalancer] No GhostStream servers available")
             return TranscodeJob(
@@ -1429,10 +1006,10 @@ class GhostStreamLoadBalancer:
                 status=TranscodeStatus.ERROR,
                 error_message="No healthy GhostStream servers available"
             )
-        
-        logger.info(f"LoadBalancer: Sending job to {server.name} ({server.host})")
-        
-        job = await self.client.transcode(
+
+        logger.info(f"LoadBalancer: Dispatching job to {server.name} ({server.host})")
+
+        job = self.client.transcode(
             source=source,
             mode=mode,
             format=format,
@@ -1442,135 +1019,114 @@ class GhostStreamLoadBalancer:
             bitrate=bitrate,
             hw_accel=hw_accel,
             start_time=start_time,
+            subtitles=subtitles,
             server=server
         )
-        
-        if job:
+
+        if job and job.job_id != "error":
             self._job_server_map[job.job_id] = server.name
-            async with self._stats_lock:
+            with self._stats_lock:
                 if server.name in self.server_stats:
                     self.server_stats[server.name].active_jobs += 1
-        
+
         return job
-    
-    async def batch_transcode(
+
+    def batch_transcode(
         self,
         jobs: List[Dict[str, Any]],
         parallel: bool = True
     ) -> List[Optional[TranscodeJob]]:
         """
         Transcode multiple files, distributing across servers.
-        
-        Args:
-            jobs: List of job configs, each with at least "source" key
-            parallel: If True, submit all jobs at once. If False, submit sequentially.
-        
-        Example:
-            jobs = await lb.batch_transcode([
-                {"source": "http://pi:5000/video1.mkv", "resolution": "1080p"},
-                {"source": "http://pi:5000/video2.mkv", "resolution": "720p"},
-                {"source": "http://pi:5000/video3.mkv"},
-            ])
+
+        When parallel=True, all jobs are spawned as greenlets and joined.
         """
+        def _submit(job_config: Dict[str, Any]) -> Optional[TranscodeJob]:
+            return self.transcode(
+                source=job_config["source"],
+                mode=job_config.get("mode", "batch"),
+                format=job_config.get("format", "mp4"),
+                video_codec=job_config.get("video_codec", "h264"),
+                audio_codec=job_config.get("audio_codec", "aac"),
+                resolution=job_config.get("resolution", "original"),
+                bitrate=job_config.get("bitrate", "auto"),
+                hw_accel=job_config.get("hw_accel", "auto"),
+                start_time=job_config.get("start_time", 0),
+                subtitles=job_config.get("subtitles")
+            )
+
         if parallel:
-            tasks = [
-                self.transcode(
-                    source=job_config["source"],
-                    mode=job_config.get("mode", "batch"),
-                    format=job_config.get("format", "mp4"),
-                    video_codec=job_config.get("video_codec", "h264"),
-                    audio_codec=job_config.get("audio_codec", "aac"),
-                    resolution=job_config.get("resolution", "original"),
-                    bitrate=job_config.get("bitrate", "auto"),
-                    hw_accel=job_config.get("hw_accel", "auto"),
-                    start_time=job_config.get("start_time", 0)
-                )
-                for job_config in jobs
-            ]
-            return await asyncio.gather(*tasks)
-        else:
-            results = []
-            for job_config in jobs:
-                job = await self.transcode(
-                    source=job_config["source"],
-                    mode=job_config.get("mode", "batch"),
-                    format=job_config.get("format", "mp4"),
-                    video_codec=job_config.get("video_codec", "h264"),
-                    audio_codec=job_config.get("audio_codec", "aac"),
-                    resolution=job_config.get("resolution", "original"),
-                    bitrate=job_config.get("bitrate", "auto"),
-                    hw_accel=job_config.get("hw_accel", "auto"),
-                    start_time=job_config.get("start_time", 0)
-                )
-                results.append(job)
-            return results
-    
-    async def get_job_status(self, job_id: str) -> Optional[TranscodeJob]:
-        """Get job status from the correct server."""
+            greenlets = [gevent.spawn(_submit, job_config) for job_config in jobs]
+            gevent.joinall(greenlets)
+            return [g.value for g in greenlets]
+
+        return [_submit(job_config) for job_config in jobs]
+
+    def get_job_status(self, job_id: str) -> Optional[TranscodeJob]:
+        """Get job status from the server that owns the job."""
         server_name = self._job_server_map.get(job_id)
         if server_name and server_name in self.client.servers:
-            server = self.client.servers[server_name]
-            return await self.client.get_job_status(job_id, server)
-        
-        # Try all servers if we don't know which one
+            return self.client.get_job_status(job_id, self.client.servers[server_name])
+
+        # Broadcast search across all servers
         for server in self.client.servers.values():
-            job = await self.client.get_job_status(job_id, server)
+            job = self.client.get_job_status(job_id, server)
             if job:
                 self._job_server_map[job_id] = server.name
                 return job
-        
+
         return None
-    
-    async def cancel_job(self, job_id: str) -> bool:
-        """Cancel a job on the correct server."""
+
+    def cancel_job(self, job_id: str) -> bool:
+        """Cancel a job on its owning server."""
         server_name = self._job_server_map.get(job_id)
-        if server_name and server_name in self.client.servers:
-            server = self.client.servers[server_name]
-            success = await self.client.cancel_job(job_id, server)
-            if success:
-                async with self._stats_lock:
-                    if server_name in self.server_stats:
-                        self.server_stats[server_name].active_jobs = max(
-                            0, self.server_stats[server_name].active_jobs - 1
-                        )
-            return success
-        return False
-    
-    async def wait_for_all(
+        if not server_name or server_name not in self.client.servers:
+            return False
+
+        server = self.client.servers[server_name]
+        success = self.client.cancel_job(job_id, server)
+        if success:
+            with self._stats_lock:
+                if server_name in self.server_stats:
+                    self.server_stats[server_name].active_jobs = max(
+                        0, self.server_stats[server_name].active_jobs - 1
+                    )
+        return success
+
+    def wait_for_all(
         self,
         job_ids: List[str],
         timeout: float = 3600,
         poll_interval: float = 5.0
     ) -> List[Optional[TranscodeJob]]:
         """
-        Wait for multiple jobs to complete.
-        
-        Useful for batch transcoding.
+        Wait for multiple jobs to complete, yielding to the gevent hub between polls.
         """
-        results = [None] * len(job_ids)
+        results: List[Optional[TranscodeJob]] = [None] * len(job_ids)
         remaining = set(range(len(job_ids)))
-        elapsed = 0
-        
+        elapsed = 0.0
+
         while remaining and elapsed < timeout:
             for i in list(remaining):
-                job = await self.get_job_status(job_ids[i])
-                if job:
-                    if job.status in [TranscodeStatus.READY, TranscodeStatus.ERROR, TranscodeStatus.CANCELLED]:
-                        results[i] = job
-                        remaining.remove(i)
-                        
-                        # Update stats
-                        server_name = self._job_server_map.get(job_ids[i])
-                        if server_name:
-                            async with self._stats_lock:
-                                if server_name in self.server_stats:
-                                    self.server_stats[server_name].active_jobs = max(
-                                        0, self.server_stats[server_name].active_jobs - 1
-                                    )
-                                    self.server_stats[server_name].total_processed += 1
-            
+                job = self.get_job_status(job_ids[i])
+                if job and job.status in (
+                    TranscodeStatus.READY,
+                    TranscodeStatus.ERROR,
+                    TranscodeStatus.CANCELLED
+                ):
+                    results[i] = job
+                    remaining.remove(i)
+                    server_name = self._job_server_map.get(job_ids[i])
+                    if server_name:
+                        with self._stats_lock:
+                            if server_name in self.server_stats:
+                                self.server_stats[server_name].active_jobs = max(
+                                    0, self.server_stats[server_name].active_jobs - 1
+                                )
+                                self.server_stats[server_name].total_processed += 1
+
             if remaining:
-                await asyncio.sleep(poll_interval)
+                gevent_sleep(poll_interval)
                 elapsed += poll_interval
-        
+
         return results

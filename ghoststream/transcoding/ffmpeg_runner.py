@@ -326,11 +326,20 @@ class FFmpegRunner:
                     state["last_progress_time"] = time.time()
                     parser.parse(line_str, progress, media_info)
                     
+                    # Log progress at INFO level only if verbose is explicitly enabled
+                    if self.verbose:
+                        logger.info(f"{log_prefix} [FFmpeg] {line_str.strip()}")
+                    else:
+                        logger.debug(f"{log_prefix} [FFmpeg] {line_str.strip()}")
+                    
                     if progress_callback and parser.should_callback():
                         try:
                             progress_callback(progress)
                         except Exception as e:
                             logger.warning(f"{log_prefix} Progress callback error: {e}")
+                else:
+                    # Log all other FFmpeg output at INFO so it appears in the TUI/logs
+                    logger.info(f"{log_prefix} [FFmpeg] {line_str.strip()}")
         except Exception as e:
             logger.debug(f"{log_prefix} stderr reader error: {e}")
     

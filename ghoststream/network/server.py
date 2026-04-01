@@ -4,11 +4,15 @@ Specter-owned HTTP ingress — NetworkIngressController.
 Flask + gevent-websocket. No aiohttp, no asyncio.
 """
 
+from __future__ import annotations
+
 import json
 import logging
+from typing import Optional
 
-from flask import Flask, request
+from flask import Flask
 from geventwebsocket.handler import WebSocketHandler
+from geventwebsocket.resource import Resource, WebSocketApplication
 from geventwebsocket.websocket import WebSocket
 from gevent.pywsgi import WSGIServer
 
@@ -19,6 +23,18 @@ from .middleware import cors_after_request, api_key_before_request
 from .websocket import get_websocket_manager
 
 logger = logging.getLogger(__name__)
+
+
+class ProgressWebSocketApplication(WebSocketApplication):
+    """Route `/ws/progress` through geventwebsocket's native app layer."""
+
+    controller: Optional["NetworkIngressController"] = None
+
+    def handle(self):
+        if self.controller is None:
+            self.ws.close()
+            return
+        self.controller._handle_websocket(self.ws)
 
 
 class NetworkIngressController(Service):
@@ -35,15 +51,11 @@ class NetworkIngressController(Service):
         self._app.before_request(api_key_before_request)
 
         register_routes(self._app)
-
-        # WebSocket endpoint
-        @self._app.route("/ws/progress")
-        def ws_progress():
-            if request.environ.get("wsgi.websocket"):
-                ws = request.environ["wsgi.websocket"]
-                self._handle_websocket(ws)
-                return ""
-            return "WebSocket connection required", 400
+        ProgressWebSocketApplication.controller = self
+        self._wsgi_app = Resource([
+            (r"^/ws/progress$", ProgressWebSocketApplication),
+            (r"^/.*", self._app),
+        ])
 
         self._server = None
 
@@ -69,9 +81,10 @@ class NetworkIngressController(Service):
     def on_start(self) -> None:
         self._server = WSGIServer(
             (self._host, self._port),
-            self._app,
+            self._wsgi_app,
             handler_class=WebSocketHandler,
             log=None,  # Suppress default gevent access logs
+            error_log=logger,  # Route errors through standard logging to protect TUI
         )
         self._server.start()
         logger.info("Network ingress listening on %s:%s", self._host, self._port)
