@@ -60,7 +60,8 @@ Response:
 {
   "job_id": "abc123-...",
   "status": "queued",
-  "stream_url": "http://localhost:8765/stream/abc123-.../master.m3u8"
+  "stream_url": "http://localhost:8765/stream/abc123-.../master.m3u8?gst=...",
+  "control_token": "eyJ..."
 }
 ```
 
@@ -87,7 +88,8 @@ curl -X POST $GHOSTSTREAM/api/transcode/start \
 ## 5. Check Job Status
 
 ```bash
-curl $GHOSTSTREAM/api/transcode/YOUR_JOB_ID/status
+curl $GHOSTSTREAM/api/transcode/YOUR_JOB_ID/status \
+  -H "X-GhostStream-Control-Token: YOUR_CONTROL_TOKEN"
 ```
 
 Response:
@@ -96,7 +98,7 @@ Response:
   "job_id": "abc123-...",
   "status": "ready",
   "progress": 100.0,
-  "stream_url": "http://localhost:8765/stream/abc123-.../master.m3u8",
+  "stream_url": "http://localhost:8765/stream/abc123-.../master.m3u8?gst=...",
   "hw_accel_used": "nvenc"
 }
 ```
@@ -108,7 +110,8 @@ Status values: `queued`, `processing`, `ready`, `error`, `cancelled`
 ## 6. Cancel a Job
 
 ```bash
-curl -X POST $GHOSTSTREAM/api/transcode/YOUR_JOB_ID/cancel
+curl -X POST $GHOSTSTREAM/api/transcode/YOUR_JOB_ID/cancel \
+  -H "X-GhostStream-Control-Token: YOUR_CONTROL_TOKEN"
 ```
 
 ---
@@ -116,7 +119,8 @@ curl -X POST $GHOSTSTREAM/api/transcode/YOUR_JOB_ID/cancel
 ## 7. Delete Job (cleanup temp files)
 
 ```bash
-curl -X DELETE $GHOSTSTREAM/api/transcode/YOUR_JOB_ID
+curl -X DELETE $GHOSTSTREAM/api/transcode/YOUR_JOB_ID \
+  -H "X-GhostStream-Control-Token: YOUR_CONTROL_TOKEN"
 ```
 
 ---
@@ -150,17 +154,19 @@ curl $GHOSTSTREAM/api/stats
 
 ## 10. Play the Stream
 
-Once status is `ready`, play the `stream_url` with any HLS player:
+Once status is `ready`, play the returned `stream_url` directly with any HLS player. Do not rebuild the `/stream/...` URL by hand, because the tokenized URL from GhostStream is what preserves playlist and segment access.
 
 ```bash
+# STREAM should come from the job response or the status response.
+
 # VLC
-vlc http://localhost:8765/stream/JOB_ID/master.m3u8
+vlc "$STREAM"
 
 # ffplay
-ffplay http://localhost:8765/stream/JOB_ID/master.m3u8
+ffplay "$STREAM"
 
 # mpv
-mpv http://localhost:8765/stream/JOB_ID/master.m3u8
+mpv "$STREAM"
 ```
 
 Or use it in a web player with hls.js:
@@ -170,7 +176,7 @@ Or use it in a web player with hls.js:
 <script>
   var video = document.getElementById('video');
   var hls = new Hls();
-  hls.loadSource('http://localhost:8765/stream/JOB_ID/master.m3u8');
+  hls.loadSource(streamUrlFromGhostStream);
   hls.attachMedia(video);
 </script>
 ```
@@ -181,16 +187,19 @@ Or use it in a web player with hls.js:
 
 ```bash
 # 1. Start transcode
-JOB=$(curl -s -X POST $GHOSTSTREAM/api/transcode/start \
+START=$(curl -s -X POST $GHOSTSTREAM/api/transcode/start \
   -H "Content-Type: application/json" \
-  -d '{"source": "https://example.com/video.mp4", "mode": "stream"}' \
-  | jq -r '.job_id')
+  -d '{"source": "https://example.com/video.mp4", "mode": "stream"}')
+
+JOB=$(printf '%s' "$START" | jq -r '.job_id')
+CONTROL=$(printf '%s' "$START" | jq -r '.control_token')
 
 echo "Job: $JOB"
 
 # 2. Wait for ready
 while true; do
-  STATUS=$(curl -s $GHOSTSTREAM/api/transcode/$JOB/status | jq -r '.status')
+  STATUS=$(curl -s $GHOSTSTREAM/api/transcode/$JOB/status \
+    -H "X-GhostStream-Control-Token: $CONTROL" | jq -r '.status')
   echo "Status: $STATUS"
   [ "$STATUS" = "ready" ] && break
   [ "$STATUS" = "error" ] && exit 1
@@ -198,12 +207,14 @@ while true; do
 done
 
 # 3. Get stream URL
-STREAM=$(curl -s $GHOSTSTREAM/api/transcode/$JOB/status | jq -r '.stream_url')
+STREAM=$(curl -s $GHOSTSTREAM/api/transcode/$JOB/status \
+  -H "X-GhostStream-Control-Token: $CONTROL" | jq -r '.stream_url')
 echo "Stream: $STREAM"
 
 # 4. Play it
 vlc "$STREAM"
 
 # 5. Cleanup when done
-curl -X DELETE $GHOSTSTREAM/api/transcode/$JOB
+curl -X DELETE $GHOSTSTREAM/api/transcode/$JOB \
+  -H "X-GhostStream-Control-Token: $CONTROL"
 ```

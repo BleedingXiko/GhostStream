@@ -3,7 +3,7 @@
     GhostStream Demo - One Click
     
     HOW TO USE:
-    1. Start GhostStream: python run.py
+    1. Start GhostStream: python -m ghoststream --server-only
     2. Serve this file via HTTP (don't open directly from filesystem):
        
        cd examples
@@ -332,11 +332,26 @@
         const TEST_VIDEO = "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_1MB.mp4";
         
         let currentJobId = null;
+        let currentControlToken = null;
         let hls = null;
         let pollInterval = null;
         
         function getServer() {
             return document.getElementById('serverUrl').value.replace(/\/$/, '');
+        }
+
+        function controlHeaders() {
+            return currentControlToken
+                ? { 'X-GhostStream-Control-Token': currentControlToken }
+                : {};
+        }
+
+        function normalizeStreamUrl(streamUrl) {
+            const stream = new URL(streamUrl);
+            const server = new URL(getServer());
+            stream.protocol = server.protocol;
+            stream.host = server.host;
+            return stream.toString();
         }
         
         function showState(state) {
@@ -378,7 +393,7 @@
             if (!connected) {
                 showState('error');
                 document.getElementById('errorMessage').textContent = 
-                    'Cannot connect to GhostStream. Make sure it\'s running: python run.py';
+                    'Cannot connect to GhostStream. Make sure it\'s running: python -m ghoststream --server-only';
                 return;
             }
             
@@ -408,6 +423,7 @@
                 
                 const job = await resp.json();
                 currentJobId = job.job_id;
+                currentControlToken = job.control_token || null;
                 
                 // Start polling
                 pollInterval = setInterval(pollStatus, 500);
@@ -422,7 +438,10 @@
             if (!currentJobId) return;
             
             try {
-                const resp = await fetch(`${getServer()}/api/transcode/${currentJobId}/status`);
+                const resp = await fetch(
+                    `${getServer()}/api/transcode/${currentJobId}/status`,
+                    { headers: controlHeaders() }
+                );
                 const data = await resp.json();
                 
                 const progress = data.progress || 0;
@@ -464,10 +483,7 @@
         function playStream(streamUrl) {
             showState('player');
             
-            // server returns its LAN IP but we're connecting via localhost)
-            const serverBase = getServer();
-            const urlPath = new URL(streamUrl).pathname;
-            const localStreamUrl = serverBase + urlPath;
+            const localStreamUrl = normalizeStreamUrl(streamUrl);
             
             document.getElementById('streamUrl').textContent = localStreamUrl;
             
@@ -509,9 +525,13 @@
             // Cancel/delete job
             if (currentJobId) {
                 try {
-                    await fetch(`${getServer()}/api/transcode/${currentJobId}`, { method: 'DELETE' });
+                    await fetch(`${getServer()}/api/transcode/${currentJobId}`, {
+                        method: 'DELETE',
+                        headers: controlHeaders(),
+                    });
                 } catch (e) {}
                 currentJobId = null;
+                currentControlToken = null;
             }
             
             showState('play');

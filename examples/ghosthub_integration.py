@@ -3,7 +3,7 @@ GhostHub + GhostStream Integration Example
 ==========================================
 
 This shows how GhostHub (running on your Pi) can discover and use
-GhostStream (running on your PC) for professional-grade transcoding.
+GhostStream (running on your PC) for hardware-accelerated transcoding.
 
 Architecture:
     Pi (AP Mode) - runs GhostHub media server

@@ -8,8 +8,6 @@ Provides:
 """
 
 import asyncio
-import json
-import os
 import shutil
 import socket
 import subprocess
@@ -26,8 +24,8 @@ import httpx
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from ghoststream.config import load_config, set_config, get_config
-from ghoststream.runtime import create_runtime
+from ghoststream.config import load_config, set_config
+from ghoststream.app.entrypoints import create_runtime
 
 
 def _find_free_port() -> int:
@@ -310,7 +308,7 @@ def api_client(test_config) -> Generator[GhostStreamTestClient, None, None]:
     """
     Live HTTP/WebSocket client bound to the real GhostStream runtime.
     """
-    runtime = create_runtime()
+    runtime = create_runtime(test_config)
     stop_event = threading.Event()
     runtime_errors = []
 
@@ -363,8 +361,10 @@ def api_client(test_config) -> Generator[GhostStreamTestClient, None, None]:
         yield client
     finally:
         stop_event.set()
-        thread.join(timeout=5.0)
+        thread.join(timeout=10.0)
         client.close()
+        if thread.is_alive():
+            raise RuntimeError("GhostStream test runtime did not shut down cleanly")
 
 
 @pytest.fixture
@@ -412,7 +412,6 @@ def http_server(test_media_dir, test_videos):
     Start a simple HTTP server to serve test media files.
     Required because GhostStream fetches media via HTTP.
     """
-    import threading
     from http.server import HTTPServer, SimpleHTTPRequestHandler
     
     class QuietHandler(SimpleHTTPRequestHandler):
@@ -423,7 +422,6 @@ def http_server(test_media_dir, test_videos):
             pass  # Suppress logging
     
     # Find available port
-    import socket
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(('', 0))
         port = s.getsockname()[1]
@@ -435,6 +433,8 @@ def http_server(test_media_dir, test_videos):
     yield f"http://localhost:{port}"
     
     server.shutdown()
+    server.server_close()
+    thread.join(timeout=5.0)
 
 
 @pytest.fixture

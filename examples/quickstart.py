@@ -7,7 +7,7 @@ Copy-paste examples to get started in 30 seconds.
 No GhostHub required - works with any video source.
 
 Run GhostStream first:
-    python run.py
+    python -m ghoststream
 
 Then run these examples:
     python examples/quickstart.py
@@ -194,7 +194,7 @@ def example_health_check():
             print(f"   Platform: {caps.get('platform', 'unknown')}")
     else:
         print(f"❌ Cannot connect to GhostStream at {GHOSTSTREAM_SERVER}")
-        print(f"   Make sure GhostStream is running: python run.py")
+        print(f"   Make sure GhostStream is running: python -m ghoststream")
 
 
 # =============================================================================
@@ -238,7 +238,7 @@ if __name__ == "__main__":
     print("=" * 50)
     print(f"\nServer: {GHOSTSTREAM_SERVER}")
     print("\nMake sure GhostStream is running first:")
-    print("  python run.py")
+    print("  python -m ghoststream")
     print("\n" + "=" * 50)
     
     # Check server first

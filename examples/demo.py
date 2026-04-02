@@ -23,7 +23,7 @@ import signal
 import subprocess
 import platform
 import webbrowser
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 from typing import Optional
 
 try:
@@ -88,7 +88,7 @@ def check_server() -> bool:
             print("❌ Failed")
             print()
             print("   GhostStream is not running!")
-            print("   Start it with: python run.py")
+            print("   Start it with: python -m ghoststream")
             print()
             return False
         
@@ -203,7 +203,19 @@ def wait_for_ready(job_id: str) -> Optional[str]:
 def open_player(stream_url: str):
     """Open the stream in a media player."""
     parsed = urlparse(stream_url)
-    local_stream_url = f"http://{GHOSTSTREAM_SERVER}{parsed.path}" if parsed.scheme and parsed.netloc else stream_url
+    if parsed.scheme and parsed.netloc:
+        local_stream_url = urlunparse(
+            (
+                "http",
+                GHOSTSTREAM_SERVER,
+                parsed.path,
+                parsed.params,
+                parsed.query,
+                parsed.fragment,
+            )
+        )
+    else:
+        local_stream_url = stream_url
 
     print()
     print(f"📺 Stream URL:")

@@ -6,7 +6,7 @@ GhostStream Minimal Example - Transcode in 10 Lines
 Copy this into your project to get started instantly.
 
 Prerequisites:
-    1. GhostStream running: python run.py
+    1. GhostStream running: python -m ghoststream
     2. Install SDK: pip install ghoststream
 
 Usage:

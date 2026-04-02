@@ -6,7 +6,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Docker-lightgrey.svg)]()
 
-GhostStream is a hardware-accelerated video transcoding server with automatic GPU detection, adaptive bitrate streaming, and minimal configuration. It serves as the transcoding backend for [GhostHub](https://ghosthub.net) but can be used standalone.
+GhostStream is a hardware-accelerated video transcoding server with automatic GPU detection, adaptive bitrate streaming, and minimal configuration. It serves as the transcoding backend for [GhostHub](https://ghosthub.net) but can be used standalone. It is designed for local-machine and LAN use, not direct public internet exposure.
 
 ## Quick Start
 
@@ -26,20 +26,30 @@ Requires FFmpeg. On startup, GhostStream launches the Textual dashboard by defau
 git clone https://github.com/BleedingXiko/GhostStream.git
 cd GhostStream
 git submodule update --init --recursive
-python run.py
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+.venv/bin/python -m ghoststream
 ```
 
-The launcher creates a virtual environment, installs dependencies, starts the embedded GhostStream engine, and opens the TUI dashboard.
+That creates a local development virtualenv in `.venv`, installs the server dependencies, and starts the Specter-native GhostStream runtime with the TUI dashboard by default.
+
+If you prefer to stay inside the activated shell, this is equivalent:
+
+```bash
+python -m ghoststream
+```
 
 ### Headless / Containers
 
 Use `--server-only` when you want the API/HLS engine without the dashboard:
 
 ```bash
-python -m ghoststream --server-only
+.venv/bin/python -m ghoststream --server-only
 ```
 
-That mode is ideal for Docker, CI smoke tests, SSH sessions, and other environments where a terminal UI is not practical.
+That mode is ideal for Docker, CI smoke tests, browser example serving, SSH sessions, and other environments where a terminal UI is not practical.
+GhostStream is intended to stay on your machine or trusted LAN even in headless mode.
 
 ## SDK Installation
 
@@ -95,7 +105,6 @@ See the `examples/` directory for additional usage examples.
 - **Batch Processing** - Queue multiple files with optional two-pass encoding
 - **Hardware Acceleration** - NVIDIA NVENC, Intel QuickSync, AMD AMF, Apple VideoToolbox
 - **Automatic Fallback** - Falls back to software encoding if hardware fails
-- **Thermal Management** - Reduces load when GPU temperature is high
 
 ### Supported Hardware Encoders
 
@@ -151,10 +160,21 @@ See the `examples/` directory for additional usage examples.
 {
   "job_id": "abc-123",
   "status": "processing",
-  "stream_url": "http://localhost:8765/stream/abc-123/master.m3u8",
+  "stream_url": "http://localhost:8765/stream/abc-123/master.m3u8?gst=eyJ...",
+  "control_token": "eyJ...",
   "progress": 0
 }
 ```
+
+Use the returned `control_token` on protected job endpoints:
+
+```bash
+curl http://localhost:8765/api/transcode/abc-123/status \
+  -H "X-GhostStream-Control-Token: eyJ..."
+```
+
+Use the returned `stream_url` as-is in players and web clients. GhostStream embeds the stream token there and propagates it through HLS playlists and segment URLs.
+The `gst=...` query parameter is that stream capability token. It authorizes playlist, segment, and download access for that job, so clients should preserve it exactly as returned.
 
 ## Examples
 
@@ -173,16 +193,18 @@ The HTML examples must be served over HTTP due to browser CORS restrictions:
 
 ```bash
 # 1. Start GhostStream
-python run.py
+.venv/bin/python -m ghoststream --server-only
 
 # 2. In another terminal, serve the examples
 cd examples
-python -m http.server 8080
+.venv/bin/python -m http.server 8080
 
 # 3. Open in browser
 #    http://localhost:8080/demo.html
 #    http://localhost:8080/web_player.html
 ```
+
+If your virtualenv is already activated, plain `python -m ghoststream --server-only` and `python -m http.server 8080` are equivalent.
 
 ## Configuration
 
@@ -190,7 +212,7 @@ Create `ghoststream.yaml` to customize (optional):
 
 ```yaml
 server:
-  host: 0.0.0.0
+  host: 0.0.0.0  # Bind on all local interfaces; use only on trusted networks
   port: 8765
 
 transcoding:
@@ -265,6 +287,8 @@ print(job.progress, job.status.value)
 {"type": "status_change", "job_id": "job-123", "data": {"status": "ready"}}
 ```
 
+For multi-job filtered subscriptions, send a `job_tokens` object keyed by job ID instead of a single `control_token`.
+
 ## Contributing
 
 After cloning, initialize the Specter submodule before running the server or tests:
@@ -286,9 +310,9 @@ Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines
 # Development setup
 git clone https://github.com/BleedingXiko/GhostStream.git
 cd GhostStream
-python -m venv venv && source venv/bin/activate  # or venv\Scripts\activate on Windows
+python -m venv .venv && source .venv/bin/activate  # or .venv\Scripts\activate on Windows
 pip install -r requirements.txt
-python -m ghoststream --log-level DEBUG
+.venv/bin/python -m ghoststream --log-level DEBUG
 ```
 
 ## License

@@ -1,19 +1,23 @@
 import argparse
 import logging
 import signal
-import socket
 import sys
-import os
 
 # DO NOT patch here - it poisons the TUI.
 # ONLY patch inside the server-only runtime path.
 
 from . import __version__
-from .config import load_config, set_config, get_config
+from .app.entrypoints import create_runtime
+from .config import load_config, set_config
 from .logging_config import setup_logging
-from .runtime import create_runtime
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_tui_hosts(configured_host: str) -> tuple[str, str]:
+    bind_host = configured_host
+    poll_host = "127.0.0.1" if configured_host == "0.0.0.0" else configured_host
+    return poll_host, bind_host
 
 
 def main():
@@ -67,7 +71,7 @@ def main():
             
         setup_logging()
         
-        runtime = create_runtime()
+        runtime = create_runtime(config)
         runtime.start()
 
         def _shutdown(*_args):
@@ -122,29 +126,18 @@ def main():
     setup_logging(console_output=False)
     
     logger.info("[BOOT] Importing TUI...")
-    from .tui import run_tui_app
+    from .tui.app import run_tui_app
     logger.info("[BOOT] TUI imported. Starting app...")
     try:
+        poll_host, bind_host = _resolve_tui_hosts(config.server.host)
         run_tui_app(
-            host=config.server.host if config.server.host != "0.0.0.0" else "127.0.0.1",
+            host=poll_host,
             port=config.server.port,
-            config_path=args.config
+            config_path=args.config,
+            bind_host=bind_host,
         )
     except KeyboardInterrupt:
         pass
-
-
-def _get_local_ip(configured_host: str) -> str:
-    if configured_host != "0.0.0.0": return configured_host
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except Exception: return "127.0.0.1"
-
-
 def detect_hardware():
     from .hardware import HardwareDetector
     from .config import get_config
