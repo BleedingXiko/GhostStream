@@ -24,7 +24,7 @@ class CustomJsonFormatter(jsonlogger.JsonFormatter):
             log_record["exception"] = self.formatException(record.exc_info)
 
 
-def setup_logging(level: Optional[str] = None, format_type: Optional[str] = None, log_file: Optional[str] = None):
+def setup_logging(level: Optional[str] = None, format_type: Optional[str] = None, log_file: Optional[str] = None, console_output: bool = True):
     """Configure logging for the application."""
     config = get_config()
     
@@ -61,11 +61,12 @@ def setup_logging(level: Optional[str] = None, format_type: Optional[str] = None
             datefmt="%Y-%m-%d %H:%M:%S"
         )
     
-    # Console handler
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(numeric_level)
-    console_handler.setFormatter(formatter)
-    root_logger.addHandler(console_handler)
+    # Console handler (standard output)
+    if console_output:
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(numeric_level)
+        console_handler.setFormatter(formatter)
+        root_logger.addHandler(console_handler)
     
     # File handler if configured
     if file_path:
@@ -79,5 +80,6 @@ def setup_logging(level: Optional[str] = None, format_type: Optional[str] = None
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("geventwebsocket.handler").setLevel(logging.WARNING)
     
     return root_logger

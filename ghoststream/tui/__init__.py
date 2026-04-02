@@ -1,0 +1,1 @@
+"""GhostStream TUI package."""

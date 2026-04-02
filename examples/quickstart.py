@@ -7,7 +7,7 @@ Copy-paste examples to get started in 30 seconds.
 No GhostHub required - works with any video source.
 
 Run GhostStream first:
-    python run.py
+    python -m ghoststream
 
 Then run these examples:
     python examples/quickstart.py
@@ -38,7 +38,7 @@ def example_url_to_hls():
     video_url = "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/1080/Big_Buck_Bunny_1080_10s_1MB.mp4"
     
     # Start transcoding using SDK
-    job = client.transcode_sync(
+    job = client.transcode(
         source=video_url,
         mode="stream",
         resolution="720p",
@@ -53,7 +53,7 @@ def example_url_to_hls():
     
     # Wait for stream to be ready
     print("   Waiting for transcode...")
-    result = client.wait_for_ready_sync(job.job_id, timeout=30)
+    result = client.wait_for_ready(job.job_id, timeout=30)
     
     if result and result.status == TranscodeStatus.READY:
         print(f"✅ Stream ready!")
@@ -68,7 +68,7 @@ def example_url_to_hls():
     
     # Cleanup
     input("\nPress Enter to cleanup...")
-    client.delete_job_sync(job.job_id)
+    client.delete_job(job.job_id)
     print("✅ Cleaned up")
 
 
@@ -112,7 +112,7 @@ def example_adaptive_bitrate():
     video_url = "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/1080/Big_Buck_Bunny_1080_10s_1MB.mp4"
     
     # Start ABR transcoding using SDK
-    job = client.transcode_sync(
+    job = client.transcode(
         source=video_url,
         mode="abr",  # Adaptive bitrate - creates 1080p, 720p, 480p variants
         video_codec="h264"
@@ -126,7 +126,7 @@ def example_adaptive_bitrate():
     print("   Creating quality variants: 1080p, 720p, 480p...")
     
     # Wait for ready
-    result = client.wait_for_ready_sync(job.job_id, timeout=60)
+    result = client.wait_for_ready(job.job_id, timeout=60)
     
     if result and result.status == TranscodeStatus.READY:
         print(f"✅ ABR stream ready!")
@@ -140,7 +140,7 @@ def example_adaptive_bitrate():
         print(f"   Master playlist: {result.stream_url}")
     
     input("\nPress Enter to cleanup...")
-    client.delete_job_sync(job.job_id)
+    client.delete_job(job.job_id)
 
 
 # =============================================================================
@@ -154,7 +154,7 @@ def example_check_hardware():
     print("-" * 40)
     
     # Get capabilities using SDK
-    caps = client.get_capabilities_sync()
+    caps = client.get_capabilities()
     
     if not caps:
         print("❌ Error: Could not get capabilities")
@@ -185,16 +185,16 @@ def example_health_check():
     print("-" * 40)
     
     # Check health using SDK
-    if client.health_check_sync():
+    if client.health_check():
         print(f"✅ GhostStream is healthy")
         # Get more details from capabilities
-        caps = client.get_capabilities_sync()
+        caps = client.get_capabilities()
         if caps:
             print(f"   Version: {caps.get('version', 'unknown')}")
             print(f"   Platform: {caps.get('platform', 'unknown')}")
     else:
         print(f"❌ Cannot connect to GhostStream at {GHOSTSTREAM_SERVER}")
-        print(f"   Make sure GhostStream is running: python run.py")
+        print(f"   Make sure GhostStream is running: python -m ghoststream")
 
 
 # =============================================================================
@@ -211,7 +211,7 @@ def example_seeking():
     video_url = "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/1080/Big_Buck_Bunny_1080_10s_1MB.mp4"
     
     # Start transcoding from specific timestamp using SDK
-    job = client.transcode_sync(
+    job = client.transcode(
         source=video_url,
         mode="stream",
         start_time=5,  # Start from 5 seconds
@@ -223,7 +223,7 @@ def example_seeking():
         
         # Cleanup after a moment
         time.sleep(3)
-        client.delete_job_sync(job.job_id)
+        client.delete_job(job.job_id)
         print("✅ Cleaned up")
     else:
         print(f"❌ Error: {job.error_message}")
@@ -238,7 +238,7 @@ if __name__ == "__main__":
     print("=" * 50)
     print(f"\nServer: {GHOSTSTREAM_SERVER}")
     print("\nMake sure GhostStream is running first:")
-    print("  python run.py")
+    print("  python -m ghoststream")
     print("\n" + "=" * 50)
     
     # Check server first

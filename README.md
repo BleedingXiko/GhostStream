@@ -6,7 +6,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Docker-lightgrey.svg)]()
 
-GhostStream is a hardware-accelerated video transcoding server with automatic GPU detection, adaptive bitrate streaming, and minimal configuration. It serves as the transcoding backend for [GhostHub](https://ghosthub.net) but can be used standalone.
+GhostStream is a hardware-accelerated video transcoding server with automatic GPU detection, adaptive bitrate streaming, and minimal configuration. It serves as the transcoding backend for [GhostHub](https://ghosthub.net) but can be used standalone. It is designed for local-machine and LAN use, not direct public internet exposure.
 
 ## Quick Start
 
@@ -18,24 +18,45 @@ GhostStream is a hardware-accelerated video transcoding server with automatic GP
 | Linux | [GhostStream-Linux](https://github.com/BleedingXiko/GhostStream/releases/latest) | `chmod +x && ./GhostStream-Linux` |
 | macOS | [GhostStream-macOS](https://github.com/BleedingXiko/GhostStream/releases/latest) | `chmod +x && ./GhostStream-macOS` |
 
-Requires FFmpeg. The application will provide installation instructions if FFmpeg is not found.
+Requires FFmpeg. On startup, GhostStream launches the Textual dashboard by default and will show install instructions if FFmpeg is missing.
 
 ### From Source
 
 ```bash
 git clone https://github.com/BleedingXiko/GhostStream.git
 cd GhostStream
-python run.py
+git submodule update --init --recursive
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+.venv/bin/python -m ghoststream
 ```
 
-The launcher creates a virtual environment, installs dependencies, and starts the server.
+That creates a local development virtualenv in `.venv`, installs the server dependencies, and starts the Specter-native GhostStream runtime with the TUI dashboard by default.
+
+If you prefer to stay inside the activated shell, this is equivalent:
+
+```bash
+python -m ghoststream
+```
+
+### Headless / Containers
+
+Use `--server-only` when you want the API/HLS engine without the dashboard:
+
+```bash
+.venv/bin/python -m ghoststream --server-only
+```
+
+That mode is ideal for Docker, CI smoke tests, browser example serving, SSH sessions, and other environments where a terminal UI is not practical.
+GhostStream is intended to stay on your machine or trusted LAN even in headless mode.
 
 ## SDK Installation
 
 **Python:**
 ```bash
 pip install ghoststream              # SDK only (lightweight)
-pip install ghoststream[server]      # Full server with all dependencies
+pip install ghoststream[server]      # Full server runtime, including Specter prerequisites
 ```
 
 **JavaScript/TypeScript:**
@@ -52,13 +73,8 @@ from ghoststream import GhostStreamClient, TranscodeStatus
 client = GhostStreamClient(manual_server="localhost:8765")
 
 # Synchronous (Flask/gevent compatible)
-job = client.transcode_sync(source="https://example.com/video.mp4", resolution="720p")
+job = client.transcode(source="https://example.com/video.mp4", resolution="720p")
 print(f"Stream URL: {job.stream_url}")
-
-# Or async
-async with GhostStreamClient(manual_server="localhost:8765") as client:
-    job = await client.transcode(source="https://example.com/video.mp4")
-    print(f"Stream URL: {job.stream_url}")
 ```
 
 **JavaScript/TypeScript:**
@@ -89,7 +105,6 @@ See the `examples/` directory for additional usage examples.
 - **Batch Processing** - Queue multiple files with optional two-pass encoding
 - **Hardware Acceleration** - NVIDIA NVENC, Intel QuickSync, AMD AMF, Apple VideoToolbox
 - **Automatic Fallback** - Falls back to software encoding if hardware fails
-- **Thermal Management** - Reduces load when GPU temperature is high
 
 ### Supported Hardware Encoders
 
@@ -145,10 +160,21 @@ See the `examples/` directory for additional usage examples.
 {
   "job_id": "abc-123",
   "status": "processing",
-  "stream_url": "http://localhost:8765/stream/abc-123/master.m3u8",
+  "stream_url": "http://localhost:8765/stream/abc-123/master.m3u8?gst=eyJ...",
+  "control_token": "eyJ...",
   "progress": 0
 }
 ```
+
+Use the returned `control_token` on protected job endpoints:
+
+```bash
+curl http://localhost:8765/api/transcode/abc-123/status \
+  -H "X-GhostStream-Control-Token: eyJ..."
+```
+
+Use the returned `stream_url` as-is in players and web clients. GhostStream embeds the stream token there and propagates it through HLS playlists and segment URLs.
+The `gst=...` query parameter is that stream capability token. It authorizes playlist, segment, and download access for that job, so clients should preserve it exactly as returned.
 
 ## Examples
 
@@ -167,16 +193,18 @@ The HTML examples must be served over HTTP due to browser CORS restrictions:
 
 ```bash
 # 1. Start GhostStream
-python run.py
+.venv/bin/python -m ghoststream --server-only
 
 # 2. In another terminal, serve the examples
 cd examples
-python -m http.server 8080
+.venv/bin/python -m http.server 8080
 
 # 3. Open in browser
 #    http://localhost:8080/demo.html
 #    http://localhost:8080/web_player.html
 ```
+
+If your virtualenv is already activated, plain `python -m ghoststream --server-only` and `python -m http.server 8080` are equivalent.
 
 ## Configuration
 
@@ -184,7 +212,7 @@ Create `ghoststream.yaml` to customize (optional):
 
 ```yaml
 server:
-  host: 0.0.0.0
+  host: 0.0.0.0  # Bind on all local interfaces; use only on trusted networks
   port: 8765
 
 transcoding:
@@ -235,29 +263,46 @@ client.start_discovery()
 client = GhostStreamClient(manual_server="192.168.1.100:8765")
 
 # Synchronous API (Flask/gevent compatible)
-job = client.transcode_sync(
+job = client.transcode(
     source="http://pi:5000/media/video.mkv",
     resolution="1080p"
 )
 if job.status != TranscodeStatus.ERROR:
     print(job.stream_url)
-
-# Async API
-job = await client.transcode(source="http://pi:5000/media/video.mkv")
 ```
 
-### WebSocket Progress
+### Progress Updates
 
 ```python
-# Subscribe to job updates
-ws.send({"type": "subscribe", "job_ids": ["job-123"]})
+# Python SDK: poll synchronously
+job = client.get_job_status("job-123")
+print(job.progress, job.status.value)
+```
 
-# Receive real-time progress
+```json
+// Browser / JS clients can use /ws/progress directly
+{"type": "subscribe", "job_ids": ["job-123"], "control_token": "token-from-start-response"}
+
 {"type": "progress", "job_id": "job-123", "data": {"progress": 45.2}}
 {"type": "status_change", "job_id": "job-123", "data": {"status": "ready"}}
 ```
 
+For multi-job filtered subscriptions, send a `job_tokens` object keyed by job ID instead of a single `control_token`.
+
 ## Contributing
+
+After cloning, initialize the Specter submodule before running the server or tests:
+
+```bash
+git submodule update --init --recursive
+```
+
+The `ghoststream/specter` directory is sourced from [BleedingXiko/SPECTER](https://github.com/BleedingXiko/SPECTER). If you need to make changes inside the submodule:
+
+1. Commit and push from within `ghoststream/specter`.
+2. Return to the GhostStream repo and commit the updated submodule pointer.
+
+That keeps GhostStream pinned to an explicit Specter revision while still letting contributors iterate on both projects.
 
 Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
@@ -265,9 +310,9 @@ Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines
 # Development setup
 git clone https://github.com/BleedingXiko/GhostStream.git
 cd GhostStream
-python -m venv venv && source venv/bin/activate  # or venv\Scripts\activate on Windows
+python -m venv .venv && source .venv/bin/activate  # or .venv\Scripts\activate on Windows
 pip install -r requirements.txt
-python -m ghoststream --log-level DEBUG
+.venv/bin/python -m ghoststream --log-level DEBUG
 ```
 
 ## License

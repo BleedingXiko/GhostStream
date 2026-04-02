@@ -2,7 +2,7 @@
 
 ## Overview
 
-GhostStream runs on your PC and provides transcoding services over the network. GhostHub (or any client) can discover it automatically or connect manually.
+GhostStream runs on your PC and provides transcoding services over your local machine or LAN. GhostHub (or any client) can discover it automatically or connect manually. It is intended for local/LAN deployment, not direct public internet exposure.
 
 **Base URL:** `http://<your-pc-ip>:8765`
 
@@ -13,12 +13,18 @@ GhostStream runs on your PC and provides transcoding services over the network. 
 ### 1. Start GhostStream on your PC
 
 ```bash
-# Check your hardware first
-python -m ghoststream --detect-hw
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
 
-# Start the server
-python -m ghoststream
+# Check your hardware first
+.venv/bin/python -m ghoststream --detect-hw
+
+# Start the API/HLS server
+.venv/bin/python -m ghoststream --server-only
 ```
+
+This `.venv` is a local development virtualenv you create in your checkout. If you prefer to stay inside the activated shell after `source .venv/bin/activate`, the equivalent commands are `python -m ghoststream --detect-hw` and `python -m ghoststream --server-only`.
 
 ### 2. Install SDK
 
@@ -39,13 +45,8 @@ client.start_discovery()
 client = GhostStreamClient(manual_server="192.168.4.2:8765")
 
 # Sync usage (Flask/GhostHub compatible)
-job = client.transcode_sync(source="http://pi:5000/video.mkv", resolution="720p")
+job = client.transcode(source="http://pi:5000/video.mkv", resolution="720p")
 print(f"Stream: {job.stream_url}")
-
-# Async usage
-async with GhostStreamClient(manual_server="192.168.4.2:8765") as client:
-    job = await client.transcode(source="http://pi:5000/video.mkv")
-    print(f"Stream: {job.stream_url}")
 ```
 
 ---
@@ -230,7 +231,8 @@ Content-Type: application/json
   "job_id": "550e8400-e29b-41d4-a716-446655440000",
   "status": "processing",
   "progress": 0,
-  "stream_url": "http://192.168.4.2:8765/stream/550e8400.../master.m3u8",
+  "stream_url": "http://192.168.4.2:8765/stream/550e8400.../master.m3u8?gst=eyJ...",
+  "control_token": "eyJ...",
   "duration": 7200.5,
   "hw_accel_used": "nvenc"
 }
@@ -306,6 +308,13 @@ Check the status of a transcoding job.
 GET /api/transcode/{job_id}/status
 ```
 
+This endpoint requires the control token returned by the start response.
+
+```bash
+curl http://192.168.4.2:8765/api/transcode/JOB_ID/status \
+  -H "X-GhostStream-Control-Token: YOUR_CONTROL_TOKEN"
+```
+
 **Response:**
 ```json
 {
@@ -314,7 +323,7 @@ GET /api/transcode/{job_id}/status
   "progress": 45.2,
   "current_time": 542.5,
   "duration": 1200.0,
-  "stream_url": "http://192.168.4.2:8765/stream/550e8400.../master.m3u8",
+  "stream_url": "http://192.168.4.2:8765/stream/550e8400.../master.m3u8?gst=eyJ...",
   "eta_seconds": 120,
   "hw_accel_used": "nvenc",
   "created_at": "2024-01-15T10:30:00Z",
@@ -341,6 +350,13 @@ Cancel a running or queued job.
 POST /api/transcode/{job_id}/cancel
 ```
 
+This endpoint requires the same control token:
+
+```bash
+curl -X POST http://192.168.4.2:8765/api/transcode/JOB_ID/cancel \
+  -H "X-GhostStream-Control-Token: YOUR_CONTROL_TOKEN"
+```
+
 **Response:**
 ```json
 {
@@ -361,6 +377,14 @@ GET /stream/{job_id}/segment_00001.ts
 ```
 
 Use the `stream_url` from the transcode response directly in any HLS-compatible video player.
+It already includes the stream token needed for HLS access.
+Do not rebuild `/stream/{job_id}/...` URLs manually unless you also preserve the same tokenized query/header behavior.
+That `gst=...` query parameter is the GhostStream stream capability token.
+
+### Download Completed Files
+
+Completed batch jobs expose a tokenized `download_url` in the status response.
+Use that URL as returned, or call `/download/{job_id}` with the same stream token behavior preserved.
 
 **VOD-Style Streaming:** GhostStream serves HLS playlists with proper VOD markers (`#EXT-X-PLAYLIST-TYPE:VOD` and `#EXT-X-ENDLIST`), enabling full seeking from the start—even while transcoding is still in progress. Players like HLS.js will treat the stream as seekable VOD content rather than live.
 
@@ -368,7 +392,7 @@ Use the `stream_url` from the transcode response directly in any HLS-compatible 
 
 ## WebSocket API
 
-Real-time progress updates with **production-grade features**:
+Real-time progress updates with built-in runtime protections:
 - Job subscription filtering (only receive updates for jobs you care about)
 - Automatic heartbeat/keepalive
 - Backpressure handling (server won't overwhelm slow clients)
@@ -405,11 +429,25 @@ ws.onmessage = (event) => {
 
 By default, you receive updates for ALL jobs. For better efficiency, subscribe only to jobs you care about:
 
+Filtered subscriptions require the control token from the start response.
+For a single job you can send `control_token`. For multiple jobs, send a `job_tokens` map keyed by job ID.
+
 ```javascript
 // Subscribe to specific jobs only
 ws.send(JSON.stringify({
   type: 'subscribe',
-  job_ids: ['job-123', 'job-456']
+  job_ids: ['job-123'],
+  control_token: 'token-from-start-response'
+}));
+
+// Subscribe to multiple jobs
+ws.send(JSON.stringify({
+  type: 'subscribe',
+  job_ids: ['job-123', 'job-456'],
+  job_tokens: {
+    'job-123': 'token-for-job-123',
+    'job-456': 'token-for-job-456'
+  }
 }));
 
 // Unsubscribe when done watching
@@ -430,7 +468,7 @@ ws.send(JSON.stringify({
 |------|---------|-------------|
 | `ping` | `{}` | Keepalive ping |
 | `pong` | `{}` | Response to server ping |
-| `subscribe` | `{job_ids: [...]}` | Subscribe to specific jobs |
+| `subscribe` | `{job_ids: [...], control_token?: "...", job_tokens?: {...}}` | Subscribe to specific jobs you are authorized to watch |
 | `unsubscribe` | `{job_ids: [...]}` | Unsubscribe from jobs |
 | `subscribe_all` | `{}` | Receive all job updates (default) |
 
@@ -470,39 +508,36 @@ ws.send(JSON.stringify({
 }
 ```
 
-### WebSocket Progress (SDK)
+### WebSocket Progress (Python SDK)
 
-The SDK has built-in WebSocket support:
+For the open-source Python SDK, use polling via `get_job_status()`:
 
 ```python
-import asyncio
 from ghoststream import GhostStreamClient, TranscodeStatus
 
-async def transcode_with_progress():
-    client = GhostStreamClient(manual_server="192.168.4.2:8765")
-    
-    # Start a job
-    job = client.transcode_sync(source="http://pi:5000/video.mkv")
-    
-    # Watch progress via WebSocket
-    async for event in client.subscribe_progress([job.job_id]):
-        if event["type"] == "progress":
-            print(f"Progress: {event['data']['progress']:.1f}%")
-        elif event["type"] == "status_change":
-            status = event["data"]["status"]
-            print(f"Status: {status}")
-            if status in ("ready", "error", "cancelled"):
-                break
-    
-    # Cleanup
-    client.delete_job_sync(job.job_id)
+client = GhostStreamClient(manual_server="192.168.4.2:8765")
+job = client.transcode(source="http://pi:5000/video.mkv")
 
-asyncio.run(transcode_with_progress())
+while True:
+    status = client.get_job_status(job.job_id)
+    if status is None:
+        print("Lost track of the job")
+        break
+
+    print(f"Progress: {status.progress:.1f}%")
+
+    if status.status in (
+        TranscodeStatus.READY,
+        TranscodeStatus.ERROR,
+        TranscodeStatus.CANCELLED,
+    ):
+        print(f"Status: {status.status.value}")
+        break
 ```
 
-### WebSocket (Raw)
+### WebSocket (Raw WebSocket Clients)
 
-For non-SDK usage:
+Browser and JavaScript clients can use `/ws/progress` directly. Here is the equivalent flow with a raw Python WebSocket client:
 
 ```python
 import asyncio
@@ -512,12 +547,14 @@ import json
 async def watch_job(server_url: str, job_id: str):
     """Watch a specific job's progress via WebSocket."""
     uri = f"ws://{server_url}/ws/progress"
+    control_token = "token-from-start-response"
     
     async with websockets.connect(uri) as ws:
         # Subscribe to only this job
         await ws.send(json.dumps({
             "type": "subscribe",
-            "job_ids": [job_id]
+            "job_ids": [job_id],
+            "control_token": control_token,
         }))
         
         async for message in ws:
@@ -559,15 +596,15 @@ from ghoststream import GhostStreamClient, TranscodeStatus
 client = GhostStreamClient(manual_server="192.168.4.2:8765")
 
 # Check health
-if client.health_check_sync():
+if client.health_check():
     print("GhostStream is online!")
 
 # Get capabilities
-caps = client.get_capabilities_sync()
+caps = client.get_capabilities()
 print(f"Available codecs: {caps['video_codecs']}")
 
 # Start transcoding
-job = client.transcode_sync(
+job = client.transcode(
     source="http://192.168.4.1:5000/media/movie.mkv",
     mode="stream",
     resolution="1080p"
@@ -579,44 +616,12 @@ else:
     print(f"Stream URL: {job.stream_url}")
 
 # Wait for ready
-result = client.wait_for_ready_sync(job.job_id, timeout=60)
+result = client.wait_for_ready(job.job_id, timeout=60)
 if result and result.status == TranscodeStatus.READY:
     print(f"Play: {result.stream_url}")
 
 # Cleanup when done
-client.delete_job_sync(job.job_id)
-```
-
-### Async Usage
-
-```python
-import asyncio
-from ghoststream import GhostStreamClient, TranscodeStatus
-
-async def main():
-    async with GhostStreamClient(manual_server="192.168.4.2:8765") as client:
-        # Check health
-        if await client.health_check():
-            print("GhostStream is online!")
-        
-        # Start transcoding
-        job = await client.transcode(
-            source="http://192.168.4.1:5000/media/movie.mkv",
-            resolution="1080p"
-        )
-        
-        print(f"Stream URL: {job.stream_url}")
-        
-        # Wait for ready
-        result = await client.wait_for_ready(job.job_id)
-        
-        if result.status == TranscodeStatus.READY:
-            print(f"Play: {result.stream_url}")
-        
-        # Cleanup
-        await client.delete_job(job.job_id)
-
-asyncio.run(main())
+client.delete_job(job.job_id)
 ```
 
 ### Auto-Discovery (mDNS)
@@ -649,12 +654,12 @@ if client.is_available():
 
 ```python
 # Basic - auto settings
-job = await client.transcode(
+job = client.transcode(
     source="http://pi:5000/video.mkv"
 )
 
 # 720p with specific codec
-job = await client.transcode(
+job = client.transcode(
     source="http://pi:5000/video.mkv",
     resolution="720p",
     video_codec="h264",
@@ -662,19 +667,19 @@ job = await client.transcode(
 )
 
 # Force software encoding (no GPU)
-job = await client.transcode(
+job = client.transcode(
     source="http://pi:5000/video.mkv",
     hw_accel="software"
 )
 
 # Start from specific time (seeking)
-job = await client.transcode(
+job = client.transcode(
     source="http://pi:5000/video.mkv",
     start_time=300  # Start at 5 minutes
 )
 
 # Batch mode (download file when done)
-job = await client.transcode(
+job = client.transcode(
     source="http://pi:5000/video.mkv",
     mode="batch",
     format="mp4"
@@ -690,7 +695,7 @@ Edit `ghoststream.yaml`:
 
 ```yaml
 server:
-  host: 0.0.0.0      # Listen on all interfaces
+  host: 0.0.0.0      # Listen on all local interfaces; use only on trusted networks
   port: 8765         # API port
 
 mdns:
@@ -701,11 +706,11 @@ transcoding:
   max_concurrent_jobs: 2    # Parallel transcodes
   segment_duration: 4       # HLS segment length (seconds)
   temp_directory: ./transcode_temp
-  # Professional features
+  # Streaming/runtime features
   enable_abr: true          # Adaptive bitrate streaming
   abr_max_variants: 4       # Max quality variants (1080p, 720p, 480p, 360p)
   tone_map_hdr: true        # Auto-convert HDR to SDR
-  retry_count: 3            # Auto-retry on transient failures
+  retry_count: 3            # Base retry count used by the FFmpeg retry policy
   stall_timeout: 120        # Kill stalled FFmpeg after N seconds
 
 hardware:
@@ -719,24 +724,24 @@ security:
 
 ---
 
-## Reliability Features
+## Runtime Reliability Features
 
-GhostStream includes production-grade reliability:
+GhostStream includes built-in runtime reliability features:
 
 ### Auto-Retry
-Transient failures (network timeouts, connection resets) automatically retry up to 3 times with exponential backoff.
+Transient source/probe/FFmpeg failures retry with backoff according to the current retry policy and error classification.
 
 ### Hardware Fallback
 If GPU encoding fails (driver issues, unsupported format), automatically falls back to software encoding.
 
 ### Stall Detection
-FFmpeg processes that stop making progress for 2 minutes are automatically terminated and retried.
+By default, FFmpeg processes that stop making progress for 2 minutes are automatically terminated and retried.
 
 ### HDR Handling
 10-bit HDR content (HDR10, Dolby Vision, HLG) is automatically tone-mapped to SDR for maximum compatibility with H.264 output.
 
 ### Quality Ladder (ABR)
-Adaptive bitrate uses a professional quality ladder:
+Adaptive bitrate uses a built-in quality ladder:
 
 | Quality | Resolution | Bitrate |
 |---------|------------|---------|
@@ -759,7 +764,7 @@ GhostHub detects video format isn't supported by browser:
 original_url = "http://pi:5000/media/movie.mkv"
 
 # Request HLS transcode to H.264
-job = await client.transcode(
+job = client.transcode(
     source=original_url,
     mode="stream",
     video_codec="h264",  # Browser-compatible
@@ -768,13 +773,13 @@ job = await client.transcode(
 
 # Give this URL to the video player
 player_url = job.stream_url
-# -> http://192.168.4.2:8765/stream/xxx/master.m3u8
+# -> http://192.168.4.2:8765/stream/xxx/master.m3u8?gst=...
 ```
 
 ### 2. Reduce Quality for Slow Network
 
 ```python
-job = await client.transcode(
+job = client.transcode(
     source="http://pi:5000/media/4k-movie.mkv",
     resolution="720p",  # Downscale
     bitrate="3M"        # Lower bitrate
@@ -786,7 +791,7 @@ job = await client.transcode(
 User clicks on timeline at 45 minutes:
 
 ```python
-job = await client.transcode(
+job = client.transcode(
     source="http://pi:5000/media/movie.mkv",
     start_time=2700  # 45 * 60 seconds
 )
@@ -796,7 +801,7 @@ job = await client.transcode(
 
 ```python
 for video in library:
-    job = await client.transcode(
+    job = client.transcode(
         source=video.url,
         mode="batch",
         format="mp4",
@@ -804,7 +809,7 @@ for video in library:
     )
     
     # Wait for completion
-    job = await client.wait_for_ready(job.job_id, timeout=3600)
+    job = client.wait_for_ready(job.job_id, timeout=3600)
     
     if job.status == "ready":
         # Download the transcoded file
@@ -816,13 +821,13 @@ for video in library:
 ## Error Handling
 
 ```python
-job = await client.transcode(source="http://pi:5000/video.mkv")
+job = client.transcode(source="http://pi:5000/video.mkv")
 
 if job is None:
     print("Failed to start transcode - server unreachable?")
     return
 
-job = await client.wait_for_ready(job.job_id, timeout=60)
+job = client.wait_for_ready(job.job_id, timeout=60)
 
 if job.status == "error":
     print(f"Transcode failed: {job.error_message}")
@@ -868,7 +873,7 @@ lb = GhostStreamLoadBalancer(
 )
 
 # Transcode - automatically picks best server
-job = await lb.transcode(
+job = lb.transcode(
     source="http://pi:5000/video.mkv",
     resolution="1080p"
 )
@@ -907,13 +912,13 @@ videos = [
 ]
 
 # Submit all at once - distributed across servers
-jobs = await lb.batch_transcode(videos, parallel=True)
+jobs = lb.batch_transcode(videos, parallel=True)
 
 # Get job IDs
 job_ids = [j.job_id for j in jobs if j]
 
 # Wait for all to complete
-results = await lb.wait_for_all(job_ids, timeout=3600)
+results = lb.wait_for_all(job_ids, timeout=3600)
 
 for job in results:
     if job and job.status == "ready":

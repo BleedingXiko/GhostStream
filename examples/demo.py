@@ -23,6 +23,7 @@ import signal
 import subprocess
 import platform
 import webbrowser
+from urllib.parse import urlparse, urlunparse
 from typing import Optional
 
 try:
@@ -50,7 +51,7 @@ def cleanup(sig=None, frame=None):
     if current_job_id:
         print(f"\n🧹 Cleaning up job {current_job_id[:8]}...")
         try:
-            client.delete_job_sync(current_job_id)
+            client.delete_job(current_job_id)
             print("✅ Cleaned up")
         except Exception:
             pass
@@ -83,18 +84,18 @@ def check_server() -> bool:
     """Check if GhostStream is running."""
     print("🔍 Checking GhostStream server...", end=" ", flush=True)
     try:
-        if not client.health_check_sync():
+        if not client.health_check():
             print("❌ Failed")
             print()
             print("   GhostStream is not running!")
-            print("   Start it with: python run.py")
+            print("   Start it with: python -m ghoststream")
             print()
             return False
         
         print(f"✅ Connected!")
         
         # Also get hardware info
-        caps = client.get_capabilities_sync()
+        caps = client.get_capabilities()
         if caps:
             print(f"   Version: {caps.get('version', 'unknown')}")
             hw_accels = [h['type'] for h in caps.get('hw_accels', []) if h.get('available')]
@@ -118,7 +119,7 @@ def start_transcode() -> Optional[str]:
     print(f"   Source: Big Buck Bunny ({TEST_VIDEO_DURATION} demo clip)")
     
     try:
-        job = client.transcode_sync(
+        job = client.transcode(
             source=TEST_VIDEO,
             mode="stream",
             resolution="720p",
@@ -148,7 +149,7 @@ def wait_for_ready(job_id: str) -> Optional[str]:
     
     for attempt in range(120):  # 2 minute timeout
         try:
-            job = client.get_job_status_sync(job_id)
+            job = client.get_job_status(job_id)
             
             if not job:
                 time.sleep(1)
@@ -201,9 +202,24 @@ def wait_for_ready(job_id: str) -> Optional[str]:
 
 def open_player(stream_url: str):
     """Open the stream in a media player."""
+    parsed = urlparse(stream_url)
+    if parsed.scheme and parsed.netloc:
+        local_stream_url = urlunparse(
+            (
+                "http",
+                GHOSTSTREAM_SERVER,
+                parsed.path,
+                parsed.params,
+                parsed.query,
+                parsed.fragment,
+            )
+        )
+    else:
+        local_stream_url = stream_url
+
     print()
     print(f"📺 Stream URL:")
-    print(f"   {stream_url}")
+    print(f"   {local_stream_url}")
     print(f"   ℹ️  Note: This is a {TEST_VIDEO_DURATION} demo clip")
     print()
     
@@ -249,10 +265,10 @@ def open_player(stream_url: str):
         print(f"   Using VLC: {vlc_path}")
         try:
             if system == "Windows":
-                subprocess.Popen([vlc_path, stream_url], 
+                subprocess.Popen([vlc_path, local_stream_url], 
                                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0)
             else:
-                subprocess.Popen([vlc_path, stream_url], 
+                subprocess.Popen([vlc_path, local_stream_url], 
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             print("   ✅ VLC opened!")
             return True
@@ -280,7 +296,7 @@ def open_player(stream_url: str):
     <video id="video" controls autoplay></video>
     <script>
         const video = document.getElementById('video');
-        const src = '{stream_url}';
+        const src = '{local_stream_url}';
         if (Hls.isSupported()) {{
             const hls = new Hls();
             hls.loadSource(src);

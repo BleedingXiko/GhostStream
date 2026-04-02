@@ -147,13 +147,15 @@ def check_ffmpeg():
 
 def setup_venv():
     """Create virtual environment if it doesn't exist."""
-    venv_path = Path(__file__).parent / "venv"
+    # Support both .venv (modern default) and venv
+    for venv_name in [".venv", "venv"]:
+        venv_path = Path(__file__).parent / venv_name
+        if venv_path.exists():
+            log_success(f"Virtual environment exists ({venv_name})")
+            return venv_path
+    venv_path = Path(__file__).parent / ".venv"
     
-    if venv_path.exists():
-        log_success("Virtual environment exists")
-        return venv_path
-    
-    log("Creating virtual environment...")
+    log("Creating virtual environment (.venv)...")
     try:
         subprocess.run(
             [sys.executable, "-m", "venv", str(venv_path)],

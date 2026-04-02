@@ -6,7 +6,7 @@ GhostStream Minimal Example - Transcode in 10 Lines
 Copy this into your project to get started instantly.
 
 Prerequisites:
-    1. GhostStream running: python run.py
+    1. GhostStream running: python -m ghoststream
     2. Install SDK: pip install ghoststream
 
 Usage:
@@ -22,7 +22,7 @@ VIDEO_URL = "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_B
 client = GhostStreamClient(manual_server="localhost:8765")
 
 # Start transcode - returns immediately with stream URL
-job = client.transcode_sync(source=VIDEO_URL, resolution="720p")
+job = client.transcode(source=VIDEO_URL, resolution="720p")
 
 if job.status == TranscodeStatus.ERROR:
     print(f"❌ Error: {job.error_message}")
@@ -32,5 +32,5 @@ else:
     print(f"\n▶ Play with VLC:")
     print(f"   vlc {job.stream_url}")
     print(f"\n▶ Or check status:")
-    status = client.get_job_status_sync(job.job_id)
+    status = client.get_job_status(job.job_id)
     print(f"   Status: {status.status.value}, Progress: {status.progress}%")

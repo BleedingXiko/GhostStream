@@ -3,35 +3,37 @@ GhostStream Launcher - Entry point for PyInstaller builds.
 Wraps the main function with error handling so users can see crash messages.
 """
 
+import logging
 import sys
-import traceback
+
+from ghoststream.logging_config import setup_logging
+
+logger = logging.getLogger(__name__)
 
 
 def main():
     """Launch GhostStream with error handling for packaged builds."""
+    setup_logging()
     try:
         from ghoststream.__main__ import main as ghoststream_main
         ghoststream_main()
     except KeyboardInterrupt:
-        print("\nShutting down...")
+        logger.info("Shutting down...")
     except Exception as e:
-        print("\n" + "=" * 60)
-        print("ERROR: GhostStream failed to start")
-        print("=" * 60)
-        print(f"\n{type(e).__name__}: {e}\n")
-        traceback.print_exc()
-        print("\n" + "=" * 60)
-        print("Common fixes:")
-        print("  1. Make sure FFmpeg is installed and in your PATH")
-        print("  2. Check if port 8765 is already in use")
-        print("  3. Try running from command line to see full output")
-        print("=" * 60)
+        logger.error("%s", "=" * 60)
+        logger.error("GhostStream failed to start")
+        logger.exception("%s: %s", type(e).__name__, e)
+        logger.error("Common fixes:")
+        logger.error("  1. Make sure FFmpeg is installed and in your PATH")
+        logger.error("  2. Check if port 8765 is already in use")
+        logger.error("  3. Try running from command line to see full output")
+        logger.error("%s", "=" * 60)
         
         # Keep console open so user can read the error
         if sys.platform == "win32":
             input("\nPress Enter to exit...")
         else:
-            print("\nPress Ctrl+C to exit...")
+            logger.info("Press Ctrl+C to exit...")
             try:
                 import time
                 while True:

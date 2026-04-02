@@ -11,14 +11,9 @@ SDK Usage:
     # Or with manual server
     client = GhostStreamClient(manual_server="192.168.4.2:8765")
     
-    # Async usage
-    async with client:
-        job = await client.transcode(source="http://...", resolution="1080p")
+    with client:
+        job = client.transcode(source="http://...", resolution="1080p")
         print(f"Stream URL: {job.stream_url}")
-    
-    # Sync usage (Flask/gevent compatible)
-    job = client.transcode_sync(source="http://...", resolution="1080p")
-    print(f"Stream URL: {job.stream_url}")
 """
 
 __version__ = "1.2.2"

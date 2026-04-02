@@ -9,7 +9,7 @@ from pathlib import Path
 
 from ghoststream.config import (
     GhostStreamConfig, ServerConfig, MDNSConfig,
-    TranscodingConfig, load_config, get_config, set_config
+    TranscodingConfig, find_config_file, load_config, get_config, set_config
 )
 
 
@@ -45,12 +45,12 @@ class TestConfigModels:
 
 class TestLoadConfig:
     """Tests for load_config function."""
-    
+
     def test_load_default_config(self):
         """Should load default config when no file exists."""
         config = load_config("/nonexistent/path.yaml")
         assert config.server.port == 8765
-    
+
     def test_load_yaml_config(self):
         """Should load config from YAML file."""
         fd, path = tempfile.mkstemp(suffix='.yaml')
@@ -72,7 +72,7 @@ transcoding:
             assert config.transcoding.max_concurrent_jobs == 4
         finally:
             os.unlink(path)
-    
+
     def test_partial_yaml_config(self):
         """Should merge partial config with defaults."""
         fd, path = tempfile.mkstemp(suffix='.yaml')
@@ -91,24 +91,53 @@ server:
         finally:
             os.unlink(path)
 
+    def test_find_config_file_uses_pyinstaller_bundle(self, tmp_path, monkeypatch):
+        """Bundled builds should pick up the embedded default config."""
+        bundle_root = tmp_path / "bundle"
+        bundle_root.mkdir()
+        bundled_config = bundle_root / "ghoststream.yaml"
+        bundled_config.write_text("server:\n  port: 9911\n", encoding="utf-8")
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.setattr("ghoststream.config.sys.frozen", True, raising=False)
+        monkeypatch.setattr("ghoststream.config.sys._MEIPASS", str(bundle_root), raising=False)
+
+        found = find_config_file()
+
+        assert found == bundled_config
+
+    def test_find_config_file_falls_back_to_repo_default(self, tmp_path, monkeypatch):
+        """Running outside the repo should still find the checked-in default config."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.setattr("ghoststream.config.sys.frozen", False, raising=False)
+        monkeypatch.delattr("ghoststream.config.sys._MEIPASS", raising=False)
+
+        found = find_config_file()
+
+        assert found is not None
+        assert found.name == "ghoststream.yaml"
+        assert found.parent == Path(__file__).resolve().parents[1]
+
 
 class TestGlobalConfig:
     """Tests for global config accessors."""
-    
+
     def test_get_config_returns_default(self):
         """get_config should return config."""
         config = get_config()
         assert isinstance(config, GhostStreamConfig)
-    
+
     def test_set_config(self):
         """set_config should update global config."""
         custom_config = GhostStreamConfig(
             server=ServerConfig(port=9999)
         )
         set_config(custom_config)
-        
+
         config = get_config()
         assert config.server.port == 9999
-        
+
         # Reset
         set_config(GhostStreamConfig())

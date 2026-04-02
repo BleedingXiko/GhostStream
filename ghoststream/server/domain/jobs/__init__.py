@@ -1,0 +1,1 @@
+"""GhostStream jobs domain package."""

@@ -3,7 +3,7 @@ GhostHub + GhostStream Integration Example
 ==========================================
 
 This shows how GhostHub (running on your Pi) can discover and use
-GhostStream (running on your PC) for professional-grade transcoding.
+GhostStream (running on your PC) for hardware-accelerated transcoding.
 
 Architecture:
     Pi (AP Mode) - runs GhostHub media server
@@ -20,11 +20,11 @@ Features demonstrated:
     - Hardware acceleration with automatic fallback
     - Job lifecycle management and cleanup
     - Seeking/resume support
-    - Real-time WebSocket progress updates with job subscriptions
+    - Progress tracking with the synchronous polling API
 
 Communication Methods:
     - HTTP REST: API calls (start job, get status, cancel)
-    - WebSocket: Real-time push updates (progress, status changes)
+    - Browser/JS clients can also use `/ws/progress` directly
     - mDNS/UDP: Server discovery on LAN
 
 SDK Installation:
@@ -32,7 +32,6 @@ SDK Installation:
     # or from source: pip install -e .
 """
 
-import asyncio
 import logging
 from typing import Optional, Dict, Any, List
 
@@ -50,10 +49,6 @@ from ghoststream import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Note: The SDK includes built-in WebSocket support via client.subscribe_progress()
-# websockets is now a required SDK dependency
-
-
 # ============== Example Usage ==============
 
 def example_basic_streaming():
@@ -69,14 +64,14 @@ def example_basic_streaming():
     # Create SDK client with manual server address
     client = GhostStreamClient(manual_server="192.168.4.2:8765")
     
-    if not client.health_check_sync():
+    if not client.health_check():
         print("❌ GhostStream not reachable")
         return
     
     print("✅ GhostStream is online")
     
     # Start transcoding using SDK
-    job = client.transcode_sync(
+    job = client.transcode(
         source="http://192.168.4.1:5000/media/movie.mkv",
         mode="stream",
         resolution="1080p"
@@ -90,7 +85,7 @@ def example_basic_streaming():
     print(f"   HW Accel: {job.hw_accel_used or 'pending'}")
     
     # Wait for stream to be ready
-    result = client.wait_for_ready_sync(job.job_id, timeout=30)
+    result = client.wait_for_ready(job.job_id, timeout=30)
     
     if result and result.status == TranscodeStatus.READY:
         print(f"✅ Stream ready!")
@@ -104,7 +99,7 @@ def example_basic_streaming():
     
     # Cleanup when done
     input("\nPress Enter to cleanup...")
-    client.delete_job_sync(job.job_id)
+    client.delete_job(job.job_id)
     print("✅ Cleaned up")
 
 
@@ -121,19 +116,19 @@ def example_abr_streaming():
     
     client = GhostStreamClient(manual_server="192.168.4.2:8765")
     
-    if not client.health_check_sync():
+    if not client.health_check():
         print("❌ GhostStream not reachable")
         return
     
     # Check capabilities using SDK
-    caps = client.get_capabilities_sync()
+    caps = client.get_capabilities()
     if caps:
         print(f"✅ Server capabilities:")
         print(f"   Video codecs: {caps.get('video_codecs', [])}")
         print(f"   HW acceleration: {caps.get('hw_accels', [])}")
     
     # Start ABR transcoding (multiple quality variants)
-    job = client.transcode_sync(
+    job = client.transcode(
         source="http://192.168.4.1:5000/media/4k-hdr-movie.mkv",
         mode="abr"
     )
@@ -145,7 +140,7 @@ def example_abr_streaming():
     print(f"✅ ABR job started: {job.job_id}")
     
     # Wait for stream
-    result = client.wait_for_ready_sync(job.job_id, timeout=60)
+    result = client.wait_for_ready(job.job_id, timeout=60)
     
     if result and result.status == TranscodeStatus.READY:
         print(f"✅ ABR stream ready!")
@@ -160,7 +155,7 @@ def example_abr_streaming():
     
     # Cleanup
     input("\nPress Enter to cleanup...")
-    client.delete_job_sync(job.job_id)
+    client.delete_job(job.job_id)
 
 
 def example_hdr_content():
@@ -177,7 +172,7 @@ def example_hdr_content():
     
     # HDR content (10-bit HEVC with HDR10/Dolby Vision)
     # GhostStream detects this and applies tone mapping automatically
-    job = client.transcode_sync(
+    job = client.transcode(
         source="http://192.168.4.1:5000/media/hdr-demo.mkv",
         mode="stream",
         resolution="1080p",
@@ -189,13 +184,13 @@ def example_hdr_content():
         print(f"✅ Job started with automatic HDR detection")
         print(f"   Tone mapping will be applied if source is HDR")
         
-        result = client.wait_for_ready_sync(job.job_id, timeout=60)
+        result = client.wait_for_ready(job.job_id, timeout=60)
         if result:
             print(f"   Result: {result.status.value}")
             if result.stream_url:
                 print(f"   Stream: {result.stream_url}")
         
-        client.delete_job_sync(job.job_id)
+        client.delete_job(job.job_id)
     else:
         print(f"❌ Failed: {job.error_message}")
 
@@ -213,7 +208,7 @@ def example_seeking():
     client = GhostStreamClient(manual_server="192.168.4.2:8765")
     
     # Start from 30 minutes (1800 seconds)
-    job = client.transcode_sync(
+    job = client.transcode(
         source="http://192.168.4.1:5000/media/movie.mkv",
         mode="stream",
         resolution="720p",
@@ -222,10 +217,10 @@ def example_seeking():
     
     if job.status != TranscodeStatus.ERROR:
         print(f"✅ Started transcoding from 30:00")
-        result = client.wait_for_ready_sync(job.job_id)
+        result = client.wait_for_ready(job.job_id)
         if result and result.stream_url:
             print(f"   Stream: {result.stream_url}")
-        client.delete_job_sync(job.job_id)
+        client.delete_job(job.job_id)
     else:
         print(f"❌ Failed: {job.error_message}")
 
@@ -243,7 +238,7 @@ def example_batch_transcode():
     client = GhostStreamClient(manual_server="192.168.4.2:8765")
     
     # High quality two-pass encoding
-    job = client.transcode_sync(
+    job = client.transcode(
         source="http://192.168.4.1:5000/media/raw-video.mkv",
         mode="batch",
         format="mp4",
@@ -257,7 +252,7 @@ def example_batch_transcode():
         print(f"   Polling for completion...")
         
         # Poll for completion (batch jobs take longer)
-        result = client.wait_for_ready_sync(job.job_id, timeout=3600)
+        result = client.wait_for_ready(job.job_id, timeout=3600)
         
         if result and result.status == TranscodeStatus.READY:
             print(f"✅ Transcoding complete!")
@@ -265,7 +260,7 @@ def example_batch_transcode():
         else:
             print(f"❌ Batch transcoding failed")
         
-        client.delete_job_sync(job.job_id)
+        client.delete_job(job.job_id)
     else:
         print(f"❌ Failed: {job.error_message}")
 
@@ -285,11 +280,11 @@ def example_cleanup_management():
     client = GhostStreamClient(manual_server="192.168.4.2:8765")
     
     # Check server health
-    if client.health_check_sync():
+    if client.health_check():
         print("✅ Server is healthy")
         
         # Get capabilities to show server info
-        caps = client.get_capabilities_sync()
+        caps = client.get_capabilities()
         if caps:
             print(f"   Version: {caps.get('version', 'unknown')}")
             print(f"   Platform: {caps.get('platform', 'unknown')}")
@@ -297,7 +292,7 @@ def example_cleanup_management():
         print("❌ Server not reachable")
     
     print("\n💡 Tip: Jobs are automatically cleaned up after timeout.")
-    print("   Use client.delete_job_sync(job_id) to clean up immediately.")
+    print("   Use client.delete_job(job_id) to clean up immediately.")
 
 
 def example_full_workflow():
@@ -313,12 +308,12 @@ def example_full_workflow():
     client = GhostStreamClient(manual_server="192.168.4.2:8765")
     
     # 1. Check if transcoding is available
-    if not client.health_check_sync():
+    if not client.health_check():
         print("GhostStream not available - play original file")
         return
     
     # 2. Get capabilities to show in UI
-    caps = client.get_capabilities_sync()
+    caps = client.get_capabilities()
     has_gpu = any("nvenc" in str(caps.get("hw_accels", [])).lower() 
                   or "qsv" in str(caps.get("hw_accels", [])).lower()) if caps else False
     print(f"✅ GhostStream available (GPU: {has_gpu})")
@@ -330,9 +325,9 @@ def example_full_workflow():
     use_abr = True  # Could be a user setting
     
     if use_abr:
-        job = client.transcode_sync(source=video_url, mode="abr")
+        job = client.transcode(source=video_url, mode="abr")
     else:
-        job = client.transcode_sync(source=video_url, mode="stream", resolution="1080p")
+        job = client.transcode(source=video_url, mode="stream", resolution="1080p")
     
     if job.status == TranscodeStatus.ERROR:
         print(f"❌ Transcoding failed - fall back to direct play: {job.error_message}")
@@ -341,11 +336,11 @@ def example_full_workflow():
     print(f"✅ Transcoding started: {job.job_id}")
     
     # 5. Wait for stream to be ready (with timeout)
-    result = client.wait_for_ready_sync(job.job_id, timeout=30)
+    result = client.wait_for_ready(job.job_id, timeout=30)
     
     if not result or result.status == TranscodeStatus.ERROR:
         print("❌ Transcoding timeout/error - fall back to direct play")
-        client.cancel_job_sync(job.job_id)
+        client.cancel_job(job.job_id)
         return
     
     # 6. Give stream URL to video player
@@ -360,65 +355,70 @@ def example_full_workflow():
     
     # 8. User stops playback -> delete job to free resources
     print("\n   User stopped playback")
-    client.delete_job_sync(job.job_id)
+    client.delete_job(job.job_id)
     print("✅ Job cleaned up")
 
 
-def example_websocket_progress():
+def example_progress_polling():
     """
-    Example 8: Real-Time WebSocket Progress
-    
-    Use SDK's built-in WebSocket support for instant progress updates.
+    Example 8: Progress Tracking
+
+    For OSS release, the Python SDK should use polling via get_job_status().
     """
     print("\n" + "="*60)
-    print("Example 8: Real-Time WebSocket Progress (Async)")
+    print("Example 8: Progress Tracking (Polling)")
     print("="*60)
-    
-    async def run_websocket_demo():
-        client = GhostStreamClient(manual_server="192.168.4.2:8765")
-        
-        if not client.health_check_sync():
-            print("❌ GhostStream not reachable")
-            return
-        
-        # Start a job
-        job = client.transcode_sync(
-            source="http://192.168.4.1:5000/media/video.mkv",
-            mode="stream",
-            resolution="720p"
-        )
-        
-        if job.status == TranscodeStatus.ERROR:
-            print(f"❌ Failed to start job: {job.error_message}")
-            return
-        
-        print(f"✅ Job started: {job.job_id}")
-        print("   Watching progress via WebSocket...")
-        
-        try:
-            # Use SDK's built-in WebSocket subscription
-            async for event in client.subscribe_progress([job.job_id]):
-                if event["type"] == "progress":
-                    data = event.get("data", {})
-                    progress = data.get('progress', 0)
-                    fps = data.get('fps', 0)
-                    speed = data.get('speed', 0)
-                    print(f"   📊 {progress:.1f}% | {fps:.0f} fps | {speed:.1f}x speed")
-                    
-                elif event["type"] == "status_change":
-                    status = event.get("data", {}).get("status")
-                    print(f"   📌 Status: {status}")
-                    if status in ("ready", "error", "cancelled"):
-                        break
-        except KeyboardInterrupt:
-            print("\n   Interrupted")
-        
-        # Cleanup
-        client.delete_job_sync(job.job_id)
+
+    client = GhostStreamClient(manual_server="192.168.4.2:8765")
+
+    if not client.health_check():
+        print("❌ GhostStream not reachable")
+        return
+
+    job = client.transcode(
+        source="http://192.168.4.1:5000/media/video.mkv",
+        mode="stream",
+        resolution="720p"
+    )
+
+    if job.status == TranscodeStatus.ERROR:
+        print(f"❌ Failed to start job: {job.error_message}")
+        return
+
+    print(f"✅ Job started: {job.job_id}")
+    print("   Polling status every second...")
+
+    try:
+        while True:
+            status = client.get_job_status(job.job_id)
+            if not status:
+                print("❌ Lost track of job state")
+                break
+
+            print(
+                f"   📊 {status.progress:.1f}% | "
+                f"{status.status.value.upper()} | "
+                f"HW: {status.hw_accel_used or 'pending'}"
+            )
+
+            if status.status in (
+                TranscodeStatus.READY,
+                TranscodeStatus.ERROR,
+                TranscodeStatus.CANCELLED,
+            ):
+                if status.stream_url:
+                    print(f"   ▶ Stream: {status.stream_url}")
+                if status.error_message:
+                    print(f"   ❌ Error: {status.error_message}")
+                break
+
+            import time
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\n   Interrupted")
+    finally:
+        client.delete_job(job.job_id)
         print("✅ Cleaned up")
-    
-    # Run the async demo
-    asyncio.run(run_websocket_demo())
 
 
 if __name__ == "__main__":
@@ -434,11 +434,12 @@ Available examples:
   5. Batch Transcoding
   6. Cleanup Management
   7. Full GhostHub Workflow
-  8. Real-Time WebSocket Progress (NEW)
+  8. Progress Tracking (Polling)
 
 Communication Methods:
   - HTTP REST: Start jobs, get status, cancel
-  - WebSocket: Real-time progress push (recommended)
+  - Python SDK: Poll `get_job_status()` for progress
+  - Browser/JS clients: `/ws/progress` for push updates
   - mDNS/UDP: Auto-discover servers on LAN
 
 Make sure GhostStream is running on your PC first:

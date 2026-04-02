@@ -16,6 +16,10 @@ import platform
 import subprocess
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parent
+ENTRYPOINT = ROOT / "ghoststream" / "launcher.py"
+DEFAULT_CONFIG = ROOT / "ghoststream.yaml"
+
 
 def get_platform():
     system = platform.system().lower()
@@ -31,10 +35,10 @@ def main():
     print("  GhostStream Build Script")
     print(f"  Platform: {get_platform()}")
     print("=" * 60)
-    
+
     # Change to script directory
-    os.chdir(Path(__file__).parent)
-    
+    os.chdir(ROOT)
+
     # Check pyinstaller
     try:
         import PyInstaller
@@ -42,11 +46,19 @@ def main():
     except ImportError:
         print("Installing PyInstaller...")
         subprocess.run([sys.executable, "-m", "pip", "install", "pyinstaller"], check=True)
-    
+
+    if not ENTRYPOINT.exists():
+        print(f"Missing entrypoint: {ENTRYPOINT}")
+        sys.exit(1)
+
+    if not DEFAULT_CONFIG.exists():
+        print(f"Missing default config: {DEFAULT_CONFIG}")
+        sys.exit(1)
+
     # Build command
     plat = get_platform()
     separator = ";" if plat == "windows" else ":"
-    
+
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--name=GhostStream",
@@ -54,82 +66,50 @@ def main():
         "--console",
         "--noconfirm",
         "--collect-all=ghoststream",
-        "--collect-all=uvicorn",
-        "--collect-all=starlette",
-        "--collect-all=fastapi",
+        "--collect-all=gevent",
+        "--collect-all=gevent_websocket",
+        "--collect-all=flask",
+        "--collect-all=textual",
+        "--collect-all=rich",
         "--collect-all=pydantic",
         "--collect-all=pydantic_core",
         "--collect-all=pydantic_settings",
-        "--hidden-import=uvicorn.logging",
-        "--hidden-import=uvicorn.loops",
-        "--hidden-import=uvicorn.loops.auto",
-        "--hidden-import=uvicorn.protocols",
-        "--hidden-import=uvicorn.protocols.http",
-        "--hidden-import=uvicorn.protocols.http.auto",
-        "--hidden-import=uvicorn.protocols.http.h11_impl",
-        "--hidden-import=uvicorn.protocols.websockets",
-        "--hidden-import=uvicorn.protocols.websockets.auto",
-        "--hidden-import=uvicorn.protocols.websockets.wsproto_impl",
-        "--hidden-import=uvicorn.protocols.websockets.websockets_impl",
-        "--hidden-import=uvicorn.lifespan",
-        "--hidden-import=uvicorn.lifespan.on",
-        "--hidden-import=uvicorn.lifespan.off",
-        "--hidden-import=starlette.responses",
-        "--hidden-import=starlette.routing",
-        "--hidden-import=starlette.middleware",
-        "--hidden-import=starlette.middleware.cors",
-        "--hidden-import=starlette.staticfiles",
-        "--hidden-import=starlette.templating",
-        "--hidden-import=anyio",
-        "--hidden-import=anyio._backends",
-        "--hidden-import=anyio._backends._asyncio",
-        "--hidden-import=sniffio",
-        "--hidden-import=h11",
-        "--hidden-import=httptools",
-        "--hidden-import=dotenv",
-        "--hidden-import=yaml",
-        "--hidden-import=httpx",
-        "--hidden-import=httpcore",
-        "--hidden-import=aiofiles",
-        "--hidden-import=aiofiles.os",
-        "--hidden-import=aiofiles.ospath",
-        "--hidden-import=websockets",
-        "--hidden-import=websockets.legacy",
-        "--hidden-import=websockets.legacy.server",
+        "--collect-all=httpx",
+        "--collect-all=zeroconf",
+        "--hidden-import=gevent.monkey",
+        "--hidden-import=flask.logging",
+        "--hidden-import=flask.sessions",
+        "--hidden-import=flask.templating",
+        "--hidden-import=flask.blueprints",
+        "--hidden-import=flask.json",
+        "--hidden-import=gevent.ssl",
+        "--hidden-import=gevent_websocket.handler",
+        "--hidden-import=gevent_websocket.server",
+        "--hidden-import=psutil",
         "--hidden-import=zeroconf",
         "--hidden-import=zeroconf._utils",
-        "--hidden-import=psutil",
-        "--hidden-import=multipart",
-        "--hidden-import=python_multipart",
-        "--hidden-import=email.mime.multipart",
-        "--hidden-import=concurrent.futures",
-        "--hidden-import=asyncio",
+        "--hidden-import=httpx",
+        "--hidden-import=httpcore",
+        "--hidden-import=yaml",
         "--hidden-import=json",
         "--hidden-import=logging.handlers",
-        "--hidden-import=typing_extensions",
-        "--hidden-import=annotated_types",
-        f"--add-data=ghoststream.yaml{separator}.",
-        "ghoststream/launcher.py",
+        f"--add-data={DEFAULT_CONFIG}{separator}.",
+        str(ENTRYPOINT),
     ]
-    
-    # Add uvloop on non-Windows
-    if plat != "windows":
-        cmd.insert(-1, "--hidden-import=uvloop")
-        cmd.insert(-1, "--hidden-import=uvicorn.loops.uvloop")
-        cmd.insert(-1, "--hidden-import=uvicorn.protocols.http.httptools_impl")
-    
+
     print("\nBuilding executable...")
-    print(f"Command: pyinstaller ... ghoststream/launcher.py")
+    print("Launcher delegates to ghoststream.__main__.main")
+    print(f"Command: pyinstaller ... {ENTRYPOINT.relative_to(ROOT)}")
     print()
-    
+
     result = subprocess.run(cmd)
-    
+
     if result.returncode == 0:
         if plat == "windows":
             exe_path = Path("dist/GhostStream.exe")
         else:
             exe_path = Path("dist/GhostStream")
-        
+
         if exe_path.exists():
             size_mb = exe_path.stat().st_size / (1024 * 1024)
             print()

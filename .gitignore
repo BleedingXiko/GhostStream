@@ -80,10 +80,13 @@ ehthumbs.db
 Thumbs.db
 
 # Project specific
+.artifacts/
 transcode_temp/
 *.log
 *.tmp
 *.m3u8
+publish.py
+publish_login.py
 
 # HLS segments (but not TypeScript)
 stream/**/*.ts

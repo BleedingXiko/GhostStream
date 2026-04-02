@@ -1,227 +1,161 @@
-"""
-Main entry point for GhostStream
-"""
-
 import argparse
-import socket
+import logging
+import signal
 import sys
-import uvicorn
+
+# DO NOT patch here - it poisons the TUI.
+# ONLY patch inside the server-only runtime path.
 
 from . import __version__
+from .app.entrypoints import create_runtime
 from .config import load_config, set_config
 from .logging_config import setup_logging
+
+logger = logging.getLogger(__name__)
+
+
+def _resolve_tui_hosts(configured_host: str) -> tuple[str, str]:
+    bind_host = configured_host
+    poll_host = "127.0.0.1" if configured_host == "0.0.0.0" else configured_host
+    return poll_host, bind_host
 
 
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
         description="GhostStream - Open Source Transcoding Service",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python -m ghoststream                    # Start with default config
-  python -m ghoststream -c config.yaml     # Start with custom config
-  python -m ghoststream --port 9000        # Start on different port
-  python -m ghoststream --detect-hw        # Detect hardware and exit
-        """
+        formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    
-    parser.add_argument(
-        "-v", "--version",
-        action="version",
-        version=f"GhostStream v{__version__}"
-    )
-    
-    parser.add_argument(
-        "-c", "--config",
-        type=str,
-        default=None,
-        help="Path to configuration file"
-    )
-    
-    parser.add_argument(
-        "--host",
-        type=str,
-        default=None,
-        help="Host to bind to (overrides config)"
-    )
-    
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=None,
-        help="Port to bind to (overrides config)"
-    )
-    
-    parser.add_argument(
-        "--log-level",
-        type=str,
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        default=None,
-        help="Logging level (overrides config)"
-    )
-    
-    parser.add_argument(
-        "--detect-hw",
-        action="store_true",
-        help="Detect hardware capabilities and exit"
-    )
-    
-    parser.add_argument(
-        "--no-mdns",
-        action="store_true",
-        help="Disable mDNS service advertisement"
-    )
-    
+
+    parser.add_argument("-v", "--version", action="version", version=f"GhostStream v{__version__}")
+    parser.add_argument("-c", "--config", type=str, default=None, help="Path to configuration file")
+    parser.add_argument("--host", type=str, default=None, help="Host to bind to")
+    parser.add_argument("--port", type=int, default=None, help="Port to bind to")
+    parser.add_argument("--log-level", type=str, choices=["DEBUG", "INFO", "WARNING", "ERROR"], default=None)
+    parser.add_argument("--log-format", type=str, choices=["json", "text"], default=None)
+    parser.add_argument("--detect-hw", action="store_true", help="Detect hardware capabilities and exit")
+    parser.add_argument("--no-mdns", action="store_true", help="Disable mDNS")
+    parser.add_argument("--server-only", action="store_true", help="Run the core engine without TUI dashboard")
+
     args = parser.parse_args()
-    
+
     # Load configuration
     config = load_config(args.config)
-    
+
     # Apply command-line overrides
-    if args.host:
-        config.server.host = args.host
-    if args.port:
-        config.server.port = args.port
-    if args.log_level:
-        config.logging.level = args.log_level
-    if args.no_mdns:
-        config.mdns.enabled = False
-    
+    if args.host: config.server.host = args.host
+    if args.port: config.server.port = args.port
+    if args.log_level: config.logging.level = args.log_level
+    if args.log_format: config.logging.format = args.log_format
+    if args.no_mdns: config.mdns.enabled = False
+
     set_config(config)
-    
-    # Setup logging
-    setup_logging()
-    
+
     # Hardware detection mode
     if args.detect_hw:
+        import gevent.monkey
+        gevent.monkey.patch_all()
+        setup_logging()
         detect_hardware()
         return
-    
-    # Get local IP address
-    local_ip = _get_local_ip(config.server.host)
-    
-    # Print professional startup banner
-    _print_startup_banner(config, local_ip)
-    
-    # Uvicorn configuration - use uvloop on Linux for better async performance
-    uvicorn.run(
-        "ghoststream.api:app",
-        host=config.server.host,
-        port=config.server.port,
-        log_level=config.logging.level.lower(),
-        access_log=config.logging.level == "DEBUG",
-        loop="uvloop" if sys.platform != "win32" else "asyncio",
-        timeout_keep_alive=30,
-    )
-
-
-def _get_local_ip(configured_host: str) -> str:
-    """Get the local IP address for display."""
-    if configured_host != "0.0.0.0":
-        return configured_host
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except Exception:
-        return "127.0.0.1"
-
-
-def _print_startup_banner(config, local_ip: str):
-    """Print a professional startup banner with key information."""
-    from .hardware import HardwareDetector
-    
-    # Detect hardware for display
-    try:
-        detector = HardwareDetector(config.transcoding.ffmpeg_path)
-        capabilities = detector.detect_all(config.transcoding.max_concurrent_jobs)
-        hw_accel = capabilities.get_best_hw_accel().value.upper()
-        ffmpeg_ver = capabilities.ffmpeg_version or "Unknown"
-    except Exception:
-        hw_accel = "NONE"
-        ffmpeg_ver = "Unknown"
-    
-    width = 62
-    
-    print("\n" + "═" * width)
-    print("   _____ _               _   _____ _                          ")
-    print("  / ____| |             | | / ____| |                         ")
-    print(" | |  __| |__   ___  ___| || (___ | |_ _ __ ___  __ _ _ __ ___ ")
-    print(" | | |_ | '_ \\ / _ \\/ __| __\\___ \\| __| '__/ _ \\/ _` | '_ ` _ \\")
-    print(" | |__| | | | | (_) \\__ \\ |_ ___) | |_| | |  __/ (_| | | | | | |")
-    print("  \\_____|_| |_|\\___/|___/\\__|____/ \\__|_|  \\___|\\__,_|_| |_| |_|")
-    print("═" * width)
-    print()
-    print(f"  {'SERVICE INFO':-^{width-4}}")
-    print(f"  Version:          {__version__}")
-    print(f"  FFmpeg:           {ffmpeg_ver}")
-    print(f"  HW Acceleration:  {hw_accel}")
-    print()
-    print(f"  {'NETWORK':-^{width-4}}")
-    print(f"  Local URL:        http://{local_ip}:{config.server.port}")
-    print(f"  Bind Address:     {config.server.host}:{config.server.port}")
-    print(f"  mDNS Discovery:   {'Enabled' if config.mdns.enabled else 'Disabled'}")
-    print()
-    print(f"  {'CONFIGURATION':-^{width-4}}")
-    print(f"  Max Jobs:         {config.transcoding.max_concurrent_jobs}")
-    print(f"  Temp Directory:   {config.transcoding.temp_directory}")
-    print(f"  Log Level:        {config.logging.level}")
-    print()
-    print("═" * width)
-    print(f"  Server starting... Logs will appear below.")
-    print("═" * width)
-    print()
-
-
-def detect_hardware():
-    """Detect and print hardware capabilities."""
-    from .hardware import HardwareDetector
-    from .config import get_config
-    
-    config = get_config()
-    
-    print("\n=== GhostStream Hardware Detection ===\n")
-    
-    try:
-        detector = HardwareDetector(config.transcoding.ffmpeg_path)
-        capabilities = detector.detect_all(config.transcoding.max_concurrent_jobs)
         
-        print(f"Platform: {capabilities.platform}")
-        print(f"FFmpeg Version: {capabilities.ffmpeg_version}")
-        print()
+    # ENGINE ONLY MODE (Used internally by TUI or for headless operation)
+    if args.server_only:
+        import gevent.monkey
+        gevent.monkey.patch_all()
         
-        print("Hardware Acceleration:")
-        print("-" * 40)
-        
-        for hw in capabilities.hw_accels:
-            status = "[OK] Available" if hw.available else "[--] Not available"
-            print(f"  {hw.type.value.upper():15} {status}")
+        # FORCE UNBUFFERED OUTPUT FOR TUI COMPATIBILITY
+        if hasattr(sys.stdout, 'reconfigure'):
+            sys.stdout.reconfigure(line_buffering=True)
+            sys.stderr.reconfigure(line_buffering=True)
             
-            if hw.available and hw.encoders:
-                print(f"    Encoders: {', '.join(hw.encoders[:5])}")
-            
-            if hw.gpu_info:
-                print(f"    GPU: {hw.gpu_info.name}")
-                print(f"    Memory: {hw.gpu_info.memory_mb} MB")
+        setup_logging()
         
-        print()
-        print("Supported Video Codecs:")
-        print(f"  {', '.join(capabilities.video_codecs)}")
+        runtime = create_runtime(config)
+        runtime.start()
+
+        def _shutdown(*_args):
+            runtime.stop()
+            sys.exit(0)
+
+        signal.signal(signal.SIGTERM, _shutdown)
+        signal.signal(signal.SIGINT, _shutdown)
         
-        print()
-        print("Supported Audio Codecs:")
-        print(f"  {', '.join(capabilities.audio_codecs)}")
-        
-        print()
-        print(f"Best Hardware Acceleration: {capabilities.get_best_hw_accel().value}")
-        
-    except Exception as e:
-        print(f"Error detecting hardware: {e}")
+        # Keep process alive with gevent
+        import gevent
+        try:
+            while True:
+                gevent.sleep(1.0)
+        except KeyboardInterrupt:
+            runtime.stop()
+            sys.exit(0)
+        return
+
+    # TUI MANAGEMENT MODE (DEFAULTS)
+    setup_logging(console_output=True)
+
+    # --- PRE-FLIGHT CHECK ---
+    from .hardware import HardwareDetector
+    try:
+        HardwareDetector()
+    except RuntimeError:
+        logger.error("%s", "!" * 50)
+        logger.error("FFMPEG NOT FOUND")
+        logger.error("GhostStream requires FFmpeg to transcode video.")
+        logger.error("Please install it for your system:")
+        if sys.platform == "darwin":
+            logger.error("  macOS: brew install ffmpeg")
+        elif sys.platform == "win32":
+            logger.error("  Windows: download from https://www.gyan.dev/ffmpeg/builds/")
+        else:
+            logger.error("  Linux: sudo apt update && sudo apt install ffmpeg")
+        logger.error("After installing, restart GhostStream.")
+        logger.error("%s", "!" * 50)
         sys.exit(1)
 
+    logger.info("[BOOT] GhostStream v%s starting...", __version__)
+    
+    # Unified Mode requires monkey patching the main process so the 
+    # internal engine thread works correctly.
+    import gevent.monkey
+    gevent.monkey.patch_all()
+    
+    logger.info("[BOOT] Launching Management Dashboard...")
+    
+    # We turn off console logging AFTER the UI is starting to avoid swallowing errors
+    setup_logging(console_output=False)
+    
+    logger.info("[BOOT] Importing TUI...")
+    from .tui.app import run_tui_app
+    logger.info("[BOOT] TUI imported. Starting app...")
+    try:
+        poll_host, bind_host = _resolve_tui_hosts(config.server.host)
+        run_tui_app(
+            host=poll_host,
+            port=config.server.port,
+            config_path=args.config,
+            bind_host=bind_host,
+        )
+    except KeyboardInterrupt:
+        pass
+def detect_hardware():
+    from .hardware import HardwareDetector
+    from .config import get_config
+    config = get_config()
+    logger.info("=== GhostStream Hardware Detection ===")
+    try:
+        detector = HardwareDetector(config.transcoding.ffmpeg_path)
+        capabilities = detector.detect_all(config.transcoding.max_concurrent_jobs)
+        logger.info("Platform: %s", capabilities.platform)
+        logger.info("FFmpeg Version: %s", capabilities.ffmpeg_version)
+        logger.info("Hardware Acceleration:")
+        for hw in capabilities.hw_accels:
+            status = "[OK] Available" if hw.available else "[--] Not available"
+            logger.info("  %-15s %s", hw.type.value.upper(), status)
+        logger.info("Best Hardware Acceleration: %s", capabilities.get_best_hw_accel().value)
+    except Exception as e:
+        logger.exception("Hardware detection failed: %s", e)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
