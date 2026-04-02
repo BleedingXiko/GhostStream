@@ -258,6 +258,33 @@ class GhostStreamClient:
         token = self._get_control_token(server, job_id)
         return {"X-GhostStream-Control-Token": token} if token else {}
 
+    def resolve_job_server(self, job_id: str) -> Optional[GhostStreamServer]:
+        """Resolve a job's owning server from in-memory token or slot tracking."""
+        if not job_id:
+            return None
+
+        suffix = f"|{job_id}"
+        tracked_keys = list(self._control_tokens.keys()) + list(self._job_slot_modes.keys())
+        for key in tracked_keys:
+            if not key.endswith(suffix):
+                continue
+
+            base_url = key[:-len(suffix)]
+            for server in self.servers.values():
+                if server.base_url == base_url:
+                    return server
+
+        return None
+
+    def get_job_auth_headers(
+        self,
+        job_id: str,
+        server: Optional[GhostStreamServer] = None
+    ) -> Dict[str, str]:
+        """Return auth headers for a job when a control token is known."""
+        resolved_server = server or self.resolve_job_server(job_id)
+        return self._auth_headers(resolved_server, job_id) if resolved_server else {}
+
     def _job_from_payload(self, data: Dict[str, Any], server) -> TranscodeJob:
         job = TranscodeJob(
             job_id=data["job_id"],
