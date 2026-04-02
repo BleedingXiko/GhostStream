@@ -130,7 +130,7 @@ export interface HealthStatus {
  * WebSocket progress event
  */
 export interface ProgressEvent {
-  type: 'progress' | 'status_change' | 'ping';
+  type: 'progress' | 'status_change' | 'ping' | 'error';
   jobId?: string;
   data?: {
     progress?: number;
@@ -139,5 +139,6 @@ export interface ProgressEvent {
     time?: number;
     speed?: number;
     status?: string;
+    error?: string;
   };
 }

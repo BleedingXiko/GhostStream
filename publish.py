@@ -104,16 +104,16 @@ def publish_python(skip_build=False):
     if not skip_build:
         # Build package
         print("\n→ Building Python package...")
-        run_cmd(f"{PYTHON_CMD} -m build")
+        run_cmd(f"{PYTHON_CMD} -m build --no-isolation")
         print("✓ Python package built successfully")
     
     # Upload to PyPI
     print("\n→ Uploading to PyPI...")
-    run_cmd(f"{PYTHON_CMD} -m twine upload dist/*")
+    run_cmd(f"{PYTHON_CMD} -m twine upload --skip-existing dist/*")
     print("✓ Python package published to PyPI!")
 
 
-def publish_npm():
+def publish_npm(npm_otp=None):
     """Build and publish npm package"""
     print("\n" + "="*60)
     print("📦 Publishing npm Package")
@@ -121,8 +121,36 @@ def publish_npm():
     
     # npm will run prepublishOnly automatically which builds
     print("\n→ Publishing to npm (will auto-build)...")
-    run_cmd("npm publish", cwd=SDK_JS_DIR)
-    print("✓ npm package published!")
+    publish_cmd = "npm publish"
+    if npm_otp:
+        publish_cmd = f"npm publish --otp={shlex.quote(str(npm_otp))}"
+
+    result = run_cmd(publish_cmd, cwd=SDK_JS_DIR, check=False)
+    if result.returncode == 0:
+        print("✓ npm package published!")
+        return
+
+    stderr_text = result.stderr or ""
+    if "EOTP" in stderr_text and not npm_otp:
+        print("\n→ npm requires an interactive publish challenge.")
+        print("→ If npm printed a browser/passkey link, complete it now in your browser.")
+        print("→ If your account uses an authenticator code instead, enter it when prompted below.")
+
+        otp = input("Press Enter to retry after browser auth, or type a 6-digit OTP: ").strip()
+        retry_cmd = "npm publish"
+        if otp:
+            retry_cmd = f"npm publish --otp={shlex.quote(otp)}"
+
+        retry_result = run_cmd(retry_cmd, cwd=SDK_JS_DIR, check=False)
+        if retry_result.returncode == 0:
+            print("✓ npm package published!")
+            return
+
+        print(f"✗ npm publish failed with exit code {retry_result.returncode}")
+        sys.exit(retry_result.returncode)
+
+    print(f"✗ npm publish failed with exit code {result.returncode}")
+    sys.exit(result.returncode)
 
 
 def main():
@@ -149,6 +177,12 @@ def main():
         "--dry-run",
         action="store_true",
         help="Build but don't publish"
+    )
+    parser.add_argument(
+        "--npm-otp",
+        type=str,
+        default=None,
+        help="One-time password for npm publish when account 2FA is enabled"
     )
     
     args = parser.parse_args()
@@ -178,7 +212,7 @@ def main():
             if pkg == "python":
                 publish_python()
             else:
-                publish_npm()
+                publish_npm(args.npm_otp)
         except Exception as e:
             print(f"✗ Error publishing {pkg}: {e}")
             sys.exit(1)

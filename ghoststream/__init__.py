@@ -16,7 +16,7 @@ SDK Usage:
         print(f"Stream URL: {job.stream_url}")
 """
 
-__version__ = "1.2.2"
+__version__ = "1.2.4"
 __author__ = "GhostStream Contributors"
 
 from ghoststream.client import (

@@ -1,6 +1,6 @@
 {
   "name": "ghoststream-sdk",
-  "version": "1.2.2",
+  "version": "1.2.4",
   "description": "JavaScript SDK for GhostStream transcoding service",
   "main": "dist/index.js",
   "module": "dist/index.mjs",

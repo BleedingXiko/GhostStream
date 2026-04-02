@@ -370,6 +370,13 @@ class GhostStreamClient:
                 self._http_client = None
         self.stop_discovery()
 
+    def __enter__(self) -> "GhostStreamClient":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        self.close()
+        return False
+
     def _request_with_retry(self, method: str, url: str, **kwargs) -> httpx.Response:
         """
         HTTP request with exponential backoff retry. Uses gevent.sleep for yielding.

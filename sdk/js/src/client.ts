@@ -41,6 +41,7 @@ export class GhostStreamClient {
   private wsUrl: string;
   private config: ClientConfig;
   private controlTokens = new Map<string, string>();
+  private static readonly RETRYABLE_STATUS_CODES = new Set([502, 503, 504]);
 
   /**
    * Create a new GhostStream client
@@ -75,13 +76,13 @@ export class GhostStreamClient {
     const url = `${this.baseUrl}${path}`;
     
     for (let attempt = 0; attempt < (this.config.retries ?? 3); attempt++) {
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(
-          () => controller.abort(),
-          this.config.timeout
-        );
+      const controller = new AbortController();
+      const timeoutId = setTimeout(
+        () => controller.abort(),
+        this.config.timeout
+      );
 
+      try {
         const response = await fetch(url, {
           method,
           headers: {
@@ -92,10 +93,20 @@ export class GhostStreamClient {
           signal: controller.signal
         });
 
-        clearTimeout(timeoutId);
-
         if (!response.ok) {
-          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+          const responseText = await response.text();
+          const shouldRetry =
+            GhostStreamClient.RETRYABLE_STATUS_CODES.has(response.status) &&
+            attempt < (this.config.retries ?? 3) - 1;
+
+          if (shouldRetry) {
+            await this.sleep(this.config.retryDelay ?? 1000);
+            continue;
+          }
+
+          throw new Error(
+            `HTTP ${response.status}: ${responseText || response.statusText}`
+          );
         }
 
         return await response.json() as T;
@@ -105,6 +116,8 @@ export class GhostStreamClient {
           return null;
         }
         await this.sleep(this.config.retryDelay ?? 1000);
+      } finally {
+        clearTimeout(timeoutId);
       }
     }
     return null;
@@ -149,6 +162,14 @@ export class GhostStreamClient {
   private controlHeaders(jobId: string): Record<string, string> {
     const token = this.controlTokens.get(jobId);
     return token ? { 'X-GhostStream-Control-Token': token } : {};
+  }
+
+  private toProgressEvent(data: Record<string, unknown>): ProgressEvent {
+    return {
+      type: data.type as ProgressEvent['type'],
+      jobId: (data.job_id ?? data.jobId) as string | undefined,
+      data: data.data as ProgressEvent['data'] | undefined
+    };
   }
 
   // ==================== Health & Capabilities ====================
@@ -362,7 +383,7 @@ export class GhostStreamClient {
     };
 
     ws.onmessage = (event) => {
-      const data = JSON.parse(event.data) as ProgressEvent;
+      const data = this.toProgressEvent(JSON.parse(event.data) as Record<string, unknown>);
       
       // Handle pings
       if (data.type === 'ping') {

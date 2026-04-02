@@ -180,7 +180,7 @@ const job = await client.transcode({
 
 // Use job.streamUrl in your video player
 console.log(job.streamUrl);
-// -> http://localhost:8765/stream/xxx/master.m3u8
+// -> http://localhost:8765/stream/xxx/master.m3u8?gst=...
 ```
 
 ### Adaptive Bitrate (ABR)
@@ -229,6 +229,7 @@ function VideoPlayer({ sourceUrl }: { sourceUrl: string }) {
 
   useEffect(() => {
     let cancelled = false;
+    let activeJobId: string | null = null;
 
     async function startTranscode() {
       const newJob = await client.transcode({
@@ -238,6 +239,7 @@ function VideoPlayer({ sourceUrl }: { sourceUrl: string }) {
       
       if (cancelled) return;
       setJob(newJob);
+      activeJobId = newJob.jobId;
 
       // Watch progress
       for await (const event of client.subscribeProgress([newJob.jobId])) {
@@ -254,7 +256,7 @@ function VideoPlayer({ sourceUrl }: { sourceUrl: string }) {
 
     return () => {
       cancelled = true;
-      if (job) client.deleteJob(job.jobId);
+      if (activeJobId) client.deleteJob(activeJobId);
     };
   }, [sourceUrl]);
 
