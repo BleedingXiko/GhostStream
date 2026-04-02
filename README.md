@@ -3,7 +3,7 @@
 **Open-Source Video Transcoding Server**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Docker-lightgrey.svg)]()
 
 GhostStream is a hardware-accelerated video transcoding server with automatic GPU detection, adaptive bitrate streaming, and minimal configuration. It serves as the transcoding backend for [GhostHub](https://ghosthub.net) but can be used standalone. It is designed for local-machine and LAN use, not direct public internet exposure.
@@ -55,9 +55,11 @@ GhostStream is intended to stay on your machine or trusted LAN even in headless 
 
 **Python:**
 ```bash
-pip install ghoststream              # SDK only (lightweight)
-pip install ghoststream[server]      # Full server runtime, including Specter prerequisites
+pip install ghoststream                # SDK + public models/contracts
+pip install "ghoststream[server]"      # Add the server runtime dependencies
 ```
+
+`python -m ghoststream` requires the `server` extra (or the full repo `requirements.txt`). `pip install ghoststream` by itself is the GhostHub/client SDK install.
 
 **JavaScript/TypeScript:**
 ```bash

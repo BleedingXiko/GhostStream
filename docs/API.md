@@ -32,6 +32,12 @@ This `.venv` is a local development virtualenv you create in your checkout. If y
 pip install ghoststream
 ```
 
+For the local GhostStream server runtime itself, install the extra dependencies:
+
+```bash
+pip install "ghoststream[server]"
+```
+
 ### 3. Connect from GhostHub (Python)
 
 ```python
@@ -587,6 +593,8 @@ The official SDK for integrating with GhostStream.
 pip install ghoststream
 ```
 
+Install `ghoststream[server]` only on machines that actually run the GhostStream server runtime.
+
 ### Sync Usage (Flask/GhostHub)
 
 ```python
@@ -848,13 +856,13 @@ If you have multiple PCs with GPUs, you can distribute transcoding across them.
 Run GhostStream on each PC:
 ```bash
 # PC 1 (192.168.4.2)
-python -m ghoststream
+python -m ghoststream --server-only
 
 # PC 2 (192.168.4.3)  
-python -m ghoststream
+python -m ghoststream --server-only
 
 # PC 3 (192.168.4.4)
-python -m ghoststream
+python -m ghoststream --server-only
 ```
 
 ### Use the Load Balancer

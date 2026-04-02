@@ -3,6 +3,8 @@ Encoder selection logic for video and audio codecs.
 Handles hardware acceleration detection and fallback.
 """
 
+from __future__ import annotations
+
 import logging
 import time
 from pathlib import Path

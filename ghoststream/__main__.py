@@ -3,21 +3,40 @@ import logging
 import signal
 import sys
 
-# DO NOT patch here - it poisons the TUI.
-# ONLY patch inside the server-only runtime path.
-
 from . import __version__
-from .app.entrypoints import create_runtime
-from .config import load_config, set_config
-from .logging_config import setup_logging
 
 logger = logging.getLogger(__name__)
+
+SERVER_RUNTIME_MODULES = {
+    "flask",
+    "geventwebsocket",
+    "psutil",
+    "pydantic_settings",
+    "pythonjsonlogger",
+    "rich",
+    "textual",
+    "yaml",
+}
 
 
 def _resolve_tui_hosts(configured_host: str) -> tuple[str, str]:
     bind_host = configured_host
     poll_host = "127.0.0.1" if configured_host == "0.0.0.0" else configured_host
     return poll_host, bind_host
+
+
+def _raise_for_missing_server_dependency(exc: ModuleNotFoundError) -> None:
+    missing = (getattr(exc, "name", None) or "").split(".", 1)[0]
+    if missing not in SERVER_RUNTIME_MODULES:
+        raise exc
+
+    print(
+        "GhostStream server runtime dependencies are not installed.\n"
+        "Install them with:\n"
+        "  pip install \"ghoststream[server]\"",
+        file=sys.stderr,
+    )
+    raise SystemExit(1) from exc
 
 
 def main():
@@ -38,6 +57,13 @@ def main():
     parser.add_argument("--server-only", action="store_true", help="Run the core engine without TUI dashboard")
 
     args = parser.parse_args()
+
+    try:
+        from .app.entrypoints import create_runtime
+        from .config import load_config, set_config
+        from .logging_config import setup_logging
+    except ModuleNotFoundError as exc:
+        _raise_for_missing_server_dependency(exc)
 
     # Load configuration
     config = load_config(args.config)
@@ -139,8 +165,11 @@ def main():
     except KeyboardInterrupt:
         pass
 def detect_hardware():
-    from .hardware import HardwareDetector
-    from .config import get_config
+    try:
+        from .config import get_config
+        from .hardware import HardwareDetector
+    except ModuleNotFoundError as exc:
+        _raise_for_missing_server_dependency(exc)
     config = get_config()
     logger.info("=== GhostStream Hardware Detection ===")
     try:
