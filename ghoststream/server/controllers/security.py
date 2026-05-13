@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from flask import abort, request
+from specter.core.registry import registry
 
 from ...app.registry_keys import CAPABILITY_SERVICE
 from ...contracts.security import CONTROL_HEADER, STREAM_HEADER, STREAM_QUERY_PARAM
 from ..domain.security.capabilities import CapabilityError, CapabilityService
-from ...specter.core.registry import registry
 
 
 def _extract_control_token() -> str | None:

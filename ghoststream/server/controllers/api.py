@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from flask import jsonify, request
 from pydantic import ValidationError
+from specter.core.controller import Controller
+from specter.core.registry import registry
 
 from ...app.registry_keys import JOB_MANAGER
 from ...contracts.api import JobStatus, TranscodeRequest
-from ...specter.core.controller import Controller
-from ...specter.core.registry import registry
 from .security import require_control_capability
 from .websocket import track_http_client_header
 

@@ -21,7 +21,7 @@ from ghoststream.server.domain.jobs.models import Job
 from ghoststream.server.domain.security.capabilities import CapabilityService
 from ghoststream.server.services.client_presence import ClientPresenceService
 from ghoststream.server.services.websocket import WebSocketManager
-from ghoststream.specter.core.registry import registry
+from specter.core.registry import registry
 
 
 class _FakeWebSocket:

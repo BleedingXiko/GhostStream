@@ -10,11 +10,11 @@ from gevent.pywsgi import WSGIServer
 from geventwebsocket.handler import WebSocketHandler
 from geventwebsocket.resource import Resource, WebSocketApplication
 from geventwebsocket.websocket import WebSocket
+from specter.core.controller import Controller
+from specter.core.lifecycle import Service
+from specter.core.registry import registry
 
 from ...app.registry_keys import CLIENT_PRESENCE
-from ...specter.core.controller import Controller
-from ...specter.core.lifecycle import Service
-from ...specter.core.registry import registry
 from ..services.websocket import WebSocketManager
 from .middleware import api_key_before_request, cors_after_request
 

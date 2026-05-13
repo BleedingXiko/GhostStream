@@ -152,9 +152,6 @@ def test_wire_contract_models_stay_in_contract_modules() -> None:
 
 
 def test_direct_flask_route_registration_stays_in_controller_glue() -> None:
-    allowed_add_url_rule = {
-        Path("ghoststream/specter/router.py"),
-    }
     allowed_request_hooks = {
         Path("ghoststream/server/controllers/websocket.py"),
     }
@@ -166,7 +163,7 @@ def test_direct_flask_route_registration_stays_in_controller_glue() -> None:
         relative = path.relative_to(REPO_ROOT)
         text = path.read_text(encoding="utf-8")
 
-        if "add_url_rule(" in text and relative not in allowed_add_url_rule:
+        if "add_url_rule(" in text:
             add_url_rule_offenders.append(str(relative))
 
         if (
@@ -183,8 +180,6 @@ def test_direct_flask_route_registration_stays_in_controller_glue() -> None:
 def test_registry_writes_stay_in_runtime_assembly() -> None:
     allowed = {
         Path("ghoststream/app/runtime.py"),
-        Path("ghoststream/specter/core/manager.py"),
-        Path("ghoststream/specter/core/registry.py"),
     }
 
     offenders = []
@@ -257,8 +252,6 @@ def test_internal_package_markers_stay_minimal() -> None:
     allowed_nonminimal = {
         Path("ghoststream/__init__.py"),
         Path("ghoststream/hardware/__init__.py"),
-        Path("ghoststream/specter/__init__.py"),
-        Path("ghoststream/specter/core/__init__.py"),
     }
 
     offenders = []

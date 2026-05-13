@@ -5,10 +5,10 @@ from __future__ import annotations
 import secrets
 
 from flask import jsonify, request
+from specter.core.registry import registry
 
 from ...app.registry_keys import APP_CONFIG
 from ...contracts.security import API_KEY_HEADER, API_KEY_QUERY_PARAM
-from ...specter.core.registry import registry
 
 
 def cors_after_request(response):

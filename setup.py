@@ -40,6 +40,7 @@ sdk_requirements = [
 # Full server dependencies (in addition to SDK)
 server_requirements = [
     # Core Framework (Specter-native: Flask + gevent)
+    "specter-runtime>=0.1.2",
     "flask>=3.0.0",
     "gevent-websocket>=0.10.1",
     # Configuration

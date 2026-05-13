@@ -9,11 +9,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import gevent
+from specter.core.lifecycle import Service
+from specter.core.manager import ServiceManager
+from specter.core.registry import registry
 
 from ..contracts.websocket import MESSAGE_TYPE_PROGRESS, MESSAGE_TYPE_STATUS_CHANGE
-from ..specter.core.lifecycle import Service
-from ..specter.core.manager import ServiceManager
-from ..specter.core.registry import registry
 from ..server.domain.transcoding.models import TranscodeProgress
 from ..server.services.client_presence import ClientPresenceService
 from ..server.services.websocket import WebSocketManager

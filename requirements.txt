@@ -2,6 +2,7 @@
 # Runtime: Flask + gevent (Specter-owned)
 
 # HTTP Server (Specter-native: Flask + gevent)
+specter-runtime>=0.1.2
 flask>=3.0.0
 gevent>=24.2.1
 gevent-websocket>=0.10.1

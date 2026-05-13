@@ -25,7 +25,6 @@ Requires FFmpeg. On startup, GhostStream launches the Textual dashboard by defau
 ```bash
 git clone https://github.com/BleedingXiko/GhostStream.git
 cd GhostStream
-git submodule update --init --recursive
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
@@ -293,18 +292,15 @@ For multi-job filtered subscriptions, send a `job_tokens` object keyed by job ID
 
 ## Contributing
 
-After cloning, initialize the Specter submodule before running the server or tests:
+After cloning, install the Python dependencies before running the server or tests:
 
 ```bash
-git submodule update --init --recursive
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
 ```
 
-The `ghoststream/specter` directory is sourced from [BleedingXiko/SPECTER](https://github.com/BleedingXiko/SPECTER). If you need to make changes inside the submodule:
-
-1. Commit and push from within `ghoststream/specter`.
-2. Return to the GhostStream repo and commit the updated submodule pointer.
-
-That keeps GhostStream pinned to an explicit Specter revision while still letting contributors iterate on both projects.
+GhostStream consumes Specter through the `specter-runtime` Python package instead of a vendored submodule.
 
 Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 

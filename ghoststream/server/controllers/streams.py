@@ -8,11 +8,11 @@ from pathlib import Path
 
 import gevent
 from flask import Response, jsonify, request, send_file
+from specter.core.controller import Controller
+from specter.core.registry import registry
 
 from ...app.registry_keys import APP_CONFIG, JOB_MANAGER
 from ...contracts.api import JobStatus
-from ...specter.core.controller import Controller
-from ...specter.core.registry import registry
 from .security import append_token_to_playlist, require_stream_capability
 from .websocket import track_http_client_header
 

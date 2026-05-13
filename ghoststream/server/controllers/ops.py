@@ -6,13 +6,13 @@ import os
 import time
 
 from flask import jsonify
+from specter.core.controller import Controller
+from specter.core.registry import registry
 
 from ... import __version__
 from ...app.registry_keys import APP_CONFIG, CLIENT_PRESENCE, JOB_MANAGER, RUNTIME_CONTEXT, WEBSOCKET_MANAGER
 from ...contracts.api import CapabilitiesResponse, HealthResponse, StatsResponse
 from ...hardware import get_capabilities
-from ...specter.core.controller import Controller
-from ...specter.core.registry import registry
 from .websocket import track_http_client_header
 
 
